@@ -20,9 +20,9 @@ def save_estimate(record):
 
             if reader.fieldnames != list(record):
                 print("CSV columns do not match. Existing file left unchanged.")
-                return
+                raise SystemExit(1)
 
-            # Keep the first retrieved estimate for each valid time.
+            # A duplicate is a successful outcome, not an error.
             for row in reader:
                 if (
                     row["valid_time_utc"] == record["valid_time_utc"]
@@ -59,11 +59,11 @@ def main():
         response = requests.get(url, params=params, timeout=30)
     except requests.exceptions.RequestException:
         print("Connection failed. Check your internet and retry.")
-        return
+        raise SystemExit(1) from None
 
     if response.status_code != 200:
         print(f"Request failed: HTTP {response.status_code}")
-        return
+        raise SystemExit(1)
 
     try:
         data = response.json()
@@ -90,9 +90,9 @@ def main():
             "data_type": "modelled_estimate",
         }
 
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
         print("The API returned an unexpected response.")
-        return
+        raise SystemExit(1) from None
 
     print("\nKarachi — Modelled Air Quality")
     print("Source: Open-Meteo / CAMS Global")
@@ -117,7 +117,7 @@ def main():
 
     if all(record[key] is None for key, _, _ in fields):
         print("\nNo air-quality or UV values available. Nothing saved.")
-        return
+        raise SystemExit(1)
 
     try:
         save_estimate(record)
@@ -126,6 +126,10 @@ def main():
             "Could not read or write the CSV. "
             "Close it if open in Excel and check folder permissions."
         )
+        raise SystemExit(1) from None
+    except (csv.Error, ValueError, KeyError, TypeError):
+        print("Invalid air-quality CSV data. Check the file before retrying.")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

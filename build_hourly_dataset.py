@@ -20,7 +20,12 @@ def load_hourly_records(path, time_column):
     selected = {}
 
     with path.open("r", newline="", encoding="utf-8-sig") as file:
-        for row in csv.DictReader(file):
+        reader = csv.DictReader(file)
+
+        if not reader.fieldnames or time_column not in reader.fieldnames:
+            raise ValueError(f"Missing required column: {time_column}")
+
+        for row in reader:
             timestamp = parse_time(row[time_column])
             hour = timestamp.replace(minute=0, second=0, microsecond=0)
 
@@ -37,7 +42,7 @@ def main():
 
     if not weather_path.exists() or not air_path.exists():
         print("Run main.py and check_air_quality.py first.")
-        return
+        raise SystemExit(1)
 
     try:
         weather = load_hourly_records(weather_path, "observed_at_utc")
@@ -81,13 +86,17 @@ def main():
 
         if not records:
             print("No records available to combine.")
-            return
+            raise SystemExit(1)
 
-        # Rebuild the derived dataset; preserve both source CSV files.
-        with output_path.open("w", newline="", encoding="utf-8") as file:
+        # Replace the derived dataset only after writing succeeds.
+        temp_path = output_path.with_suffix(".tmp")
+
+        with temp_path.open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, fieldnames=list(records[0]))
             writer.writeheader()
             writer.writerows(records)
+
+        temp_path.replace(output_path)
 
         matched = sum(
             row["weather_available"] and row["air_available"]
@@ -99,10 +108,12 @@ def main():
         print(f"Hours with both sources: {matched}")
         print(f"Hours missing a source: {len(records) - matched}")
 
-    except (ValueError, KeyError, TypeError):
+    except (csv.Error, ValueError, KeyError, TypeError):
         print("Invalid CSV format or timestamp. Check the source files.")
+        raise SystemExit(1) from None
     except OSError:
         print("File access failed. Close the CSV files in Excel and retry.")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

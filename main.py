@@ -26,9 +26,12 @@ def save_observation(record):
             old_fields = reader.fieldnames or []
             rows = list(reader)
 
-        if not set(old_fields).issubset(fields):
+        if (
+            "observed_at_utc" not in old_fields
+            or not set(old_fields).issubset(fields)
+        ):
             print("Unexpected CSV columns. Existing file left unchanged.")
-            return
+            raise SystemExit(1)
 
     schema_changed = old_fields != fields
 
@@ -42,14 +45,15 @@ def save_observation(record):
 
     existing = next(
         (
-            row for row in rows
+            row
+            for row in rows
             if row["observed_at_utc"] == record["observed_at_utc"]
         ),
         None,
     )
 
     if existing is not None:
-        # Add newly introduced fields only when their values were not collected.
+        # Add newly introduced fields only when they were not collected.
         updated = False
         new_fields = (
             "retrieved_at_utc",
@@ -89,7 +93,7 @@ def main():
 
     if not api_key:
         print("Missing API key. Check your .env file.")
-        return
+        raise SystemExit(1)
 
     url = "https://api.openweathermap.org/data/2.5/weather"
 
@@ -105,15 +109,15 @@ def main():
     except requests.exceptions.RequestException:
         # Do not print the request URL because it contains the API key.
         print("Connection failed. Check your internet connection and retry.")
-        return
+        raise SystemExit(1) from None
 
     if response.status_code == 401:
         print("Key not accepted. Check the key or allow time for activation.")
-        return
+        raise SystemExit(1)
 
     if response.status_code != 200:
         print(f"Weather request failed: HTTP {response.status_code}")
-        return
+        raise SystemExit(1)
 
     try:
         data = response.json()
@@ -136,9 +140,17 @@ def main():
             "snow_field_supplied": "1h" in (data.get("snow") or {}),
         }
 
-    except (ValueError, KeyError, IndexError, TypeError, OverflowError):
+    except (
+        ValueError,
+        KeyError,
+        IndexError,
+        TypeError,
+        AttributeError,
+        OverflowError,
+        OSError,
+    ):
         print("The API returned an unexpected response.")
-        return
+        raise SystemExit(1) from None
 
     wind_speed = record["wind_speed_ms"]
     wind_direction = record["wind_direction_deg"]
@@ -167,6 +179,10 @@ def main():
             "Could not read or write the CSV file. "
             "Close it if open in Excel and check folder permissions."
         )
+        raise SystemExit(1) from None
+    except (csv.Error, ValueError, KeyError, TypeError):
+        print("Invalid weather CSV data. Check the file before retrying.")
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
