@@ -1,11 +1,10 @@
-import os
 import csv
+import os
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
-
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -78,10 +77,7 @@ def main():
 
     try:
         data = response.json()
-
-        observed_at = datetime.fromtimestamp(
-            data["dt"], tz=timezone.utc
-        )
+        observed_at = datetime.fromtimestamp(data["dt"], tz=UTC)
 
         record = {
             "observed_at_utc": observed_at.isoformat(),

@@ -1,9 +1,8 @@
 import csv
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
 
 import requests
-
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -70,17 +69,15 @@ def main():
         data = response.json()
         current = data["current"]
 
-        valid_time = datetime.fromisoformat(
-            current["time"].replace("Z", "+00:00")
-        )
+        valid_time = datetime.fromisoformat(current["time"])
 
         # We explicitly requested UTC from the API.
         if valid_time.tzinfo is None:
-            valid_time = valid_time.replace(tzinfo=timezone.utc)
+            valid_time = valid_time.replace(tzinfo=UTC)
 
         record = {
-            "valid_time_utc": valid_time.astimezone(timezone.utc).isoformat(),
-            "retrieved_at_utc": datetime.now(timezone.utc).isoformat(),
+            "valid_time_utc": valid_time.astimezone(UTC).isoformat(),
+            "retrieved_at_utc": datetime.now(UTC).isoformat(),
             "requested_latitude": params["latitude"],
             "requested_longitude": params["longitude"],
             "grid_latitude": data["latitude"],
