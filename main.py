@@ -1,5 +1,6 @@
 import csv
 import os
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,33 +16,72 @@ def save_observation(record):
     data_dir.mkdir(exist_ok=True)
 
     csv_path = data_dir / "weather_observations.csv"
-    has_data = csv_path.exists() and csv_path.stat().st_size > 0
+    fields = list(record)
+    rows = []
+    old_fields = fields
 
-    # Check whether this observation was already saved.
-    if has_data:
-        with csv_path.open("r", newline="", encoding="utf-8") as file:
+    if csv_path.exists() and csv_path.stat().st_size > 0:
+        with csv_path.open("r", newline="", encoding="utf-8-sig") as file:
             reader = csv.DictReader(file)
+            old_fields = reader.fieldnames or []
+            rows = list(reader)
 
-            # Prevent appending incompatible columns to an existing file.
-            if reader.fieldnames != list(record):
-                print("CSV columns do not match. Existing file left unchanged.")
-                return
+        if not set(old_fields).issubset(fields):
+            print("Unexpected CSV columns. Existing file left unchanged.")
+            return
 
-            for row in reader:
-                if row["observed_at_utc"] == record["observed_at_utc"]:
-                    print("\nThis observation is already saved.")
-                    return
+    schema_changed = old_fields != fields
 
-    # Append the new observation.
-    with csv_path.open("a", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=list(record))
+    if schema_changed:
+        backup_path = csv_path.with_name(
+            f"weather_observations_backup_"
+            f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%f')}.csv"
+        )
+        shutil.copy2(csv_path, backup_path)
+        print(f"Backup saved to: {backup_path}")
 
-        if not has_data:
-            writer.writeheader()
+    existing = next(
+        (
+            row for row in rows
+            if row["observed_at_utc"] == record["observed_at_utc"]
+        ),
+        None,
+    )
 
-        writer.writerow(record)
+    if existing is not None:
+        # Add newly introduced fields only when their values were not collected.
+        updated = False
+        new_fields = (
+            "retrieved_at_utc",
+            "rain_api_1h",
+            "snow_api_1h",
+            "rain_field_supplied",
+            "snow_field_supplied",
+        )
 
-    print(f"\nObservation saved to: {csv_path}")
+        for field in new_fields:
+            if existing.get(field, "") == "":
+                value = record.get(field)
+                if value is not None:
+                    existing[field] = value
+                    updated = True
+
+        if not updated and not schema_changed:
+            print("\nThis observation is already saved.")
+            return
+    else:
+        rows.append(record)
+
+    # Write to a temporary file before replacing the original.
+    temp_path = csv_path.with_suffix(".tmp")
+
+    with temp_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    temp_path.replace(csv_path)
+    print(f"\nWeather CSV saved to: {csv_path}")
 
 
 def main():
@@ -89,6 +129,11 @@ def main():
             "wind_direction_deg": data.get("wind", {}).get("deg"),
             "conditions": data["weather"][0]["description"],
             "source": "openweather",
+            "retrieved_at_utc": datetime.now(UTC).isoformat(),
+            "rain_api_1h": (data.get("rain") or {}).get("1h"),
+            "snow_api_1h": (data.get("snow") or {}).get("1h"),
+            "rain_field_supplied": "1h" in (data.get("rain") or {}),
+            "snow_field_supplied": "1h" in (data.get("snow") or {}),
         }
 
     except (ValueError, KeyError, IndexError, TypeError, OverflowError):
