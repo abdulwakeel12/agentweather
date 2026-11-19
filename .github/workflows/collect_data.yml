@@ -1,0 +1,80 @@
+name: AgentWeather Manual Collection
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agentweather-ingestion
+  cancel-in-progress: false
+
+jobs:
+  collect-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+      HOPSWORKS_API_KEY: ${{ secrets.HOPSWORKS_API_KEY }}
+      HOPSWORKS_PROJECT: ${{ vars.HOPSWORKS_PROJECT }}
+      HOPSWORKS_HOST: ${{ vars.HOPSWORKS_HOST }}
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Check required settings
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          required = [
+              "OPENWEATHER_API_KEY",
+              "HOPSWORKS_API_KEY",
+              "HOPSWORKS_PROJECT",
+              "HOPSWORKS_HOST",
+          ]
+
+          missing = [
+              name for name in required
+              if not os.getenv(name, "").strip()
+          ]
+
+          if missing:
+              print("Missing GitHub settings: " + ", ".join(missing))
+              sys.exit(1)
+
+          print("All required settings are present.")
+          PY
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt --timeout 120 --retries 5
+          python -m pip check
+
+      - name: Collect data and build hourly dataset
+        run: python run_pipeline.py
+
+      - name: Validate hourly dataset
+        run: python validate_data.py
+
+      - name: Check source data preparation
+        run: python prepare_data.py
+
+      - name: Upload air quality to Hopsworks
+        run: python upload_air_quality.py
+
+      - name: Upload weather to Hopsworks
+        run: python upload_weather.py
