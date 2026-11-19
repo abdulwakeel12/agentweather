@@ -1,6 +1,7 @@
 import csv
 import math
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 DATA_PATH = Path(__file__).resolve().parent / "data" / "hourly_dataset.csv"
@@ -122,9 +123,7 @@ def main():
 
             if missing_hours:
                 print("\nCollection gaps:")
-                for previous, current in zip(
-                    unique_hours, unique_hours[1:]
-                ):
+                for previous, current in pairwise(unique_hours):
                     gap = int(
                         (current - previous).total_seconds() // 3600
                     ) - 1
