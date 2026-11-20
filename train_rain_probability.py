@@ -1,3 +1,4 @@
+import argparse
 import json
 import warnings
 from datetime import UTC, datetime
@@ -7,6 +8,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import sklearn
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -24,6 +26,16 @@ TARGET_COLUMNS = [
     f"rain_event_t_plus_{horizon}h"
     for horizon in HORIZONS
 ]
+
+RF_PARAMETERS = {
+    "n_estimators": 150,
+    "max_depth": 12,
+    "min_samples_leaf": 10,
+    "max_features": 0.5,
+    "class_weight": None,
+    "random_state": 42,
+    "n_jobs": 2,
+}
 
 
 def load_supervised(name, start, end):
@@ -100,7 +112,6 @@ def load_data():
     if not np.isfinite(values).all() or (values < 0).any():
         raise ValueError("Invalid historical rain amounts.")
 
-    # Check that labels represent rain at exactly t + horizon.
     for targets in (y_train, y_val):
         for horizon, column in zip(
             HORIZONS, TARGET_COLUMNS, strict=True
@@ -123,11 +134,12 @@ def probability_scores(actual, probabilities):
     probabilities = np.asarray(probabilities, dtype=float)
 
     if (
-        not np.isfinite(probabilities).all()
+        probabilities.shape != actual.shape
+        or not np.isfinite(probabilities).all()
         or (probabilities < 0).any()
         or (probabilities > 1).any()
     ):
-        raise ValueError("Probabilities must be between zero and one.")
+        raise ValueError("Invalid probabilities.")
 
     predicted = probabilities >= DECISION_THRESHOLD
 
@@ -135,24 +147,23 @@ def probability_scores(actual, probabilities):
     fp = int(((actual == 0) & predicted).sum())
     fn = int(((actual == 1) & ~predicted).sum())
 
-    precision = tp / (tp + fp) if tp + fp else np.nan
-    recall = tp / (tp + fn) if tp + fn else np.nan
     denominator = 2 * tp + fp + fn
-    f1 = 2 * tp / denominator if denominator else np.nan
 
     return {
         "actual_rain_hours": int(actual.sum()),
         "predicted_rain_hours": int(predicted.sum()),
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn,
         "mean_probability": float(probabilities.mean()),
         "brier_score": float(np.mean((probabilities - actual) ** 2)),
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
+        "precision": tp / (tp + fp) if tp + fp else np.nan,
+        "recall": tp / (tp + fn) if tp + fn else np.nan,
+        "f1": 2 * tp / denominator if denominator else np.nan,
     }
 
 
-def reliability_rows(actual, probabilities, horizon):
-    # Fixed bins; these summarize probabilities, not recalibrate them.
+def reliability_rows(actual, probabilities, horizon, model_name):
     bins = np.minimum(
         (np.asarray(probabilities) * 10).astype(int), 9
     )
@@ -164,6 +175,7 @@ def reliability_rows(actual, probabilities, horizon):
 
         rows.append(
             {
+                "model": model_name,
                 "horizon_hours": horizon,
                 "bin_lower": number / 10,
                 "bin_upper": (number + 1) / 10,
@@ -180,24 +192,79 @@ def reliability_rows(actual, probabilities, horizon):
     return rows
 
 
+def load_previous_predictions(run_name, expected_index):
+    path = (
+        DATA_DIR / "models" / run_name / "validation_probabilities.csv"
+    )
+
+    predictions = pd.read_csv(path)
+    predictions["hour_utc"] = pd.to_datetime(
+        predictions["hour_utc"], utc=True, errors="raise"
+    )
+    predictions = predictions.set_index("hour_utc").sort_index()
+
+    if not predictions.index.equals(expected_index):
+        raise ValueError("Previous predictions use different timestamps.")
+
+    if list(predictions.columns) != TARGET_COLUMNS:
+        raise ValueError("Previous prediction columns do not match.")
+
+    values = predictions.to_numpy(dtype=float)
+    if (
+        not np.isfinite(values).all()
+        or (values < 0).any()
+        or (values > 1).any()
+    ):
+        raise ValueError("Invalid saved logistic probabilities.")
+
+    return predictions
+
+
 def main():
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate hourly rain probabilities."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["logistic", "random_forest"],
+        default="logistic",
+    )
+    parser.add_argument(
+        "--logistic-run",
+        help="Existing logistic run folder to compare with Random Forest.",
+    )
+    args = parser.parse_args()
+
+    if args.model == "random_forest" and not args.logistic_run:
+        parser.error("--logistic-run is required for Random Forest.")
+
     try:
         x_train, y_train, x_val, y_val, rain = load_data()
 
+        previous = None
+        if args.model == "random_forest":
+            previous = load_previous_predictions(
+                args.logistic_run, x_val.index
+            )
+
+        scaler = None
+        if args.model == "logistic":
+            scaler = StandardScaler()
+            train_inputs = scaler.fit_transform(x_train)
+            val_inputs = scaler.transform(x_val)
+        else:
+            train_inputs = x_train
+            val_inputs = x_val
+
+        print(f"Model: {args.model}")
         print(f"Training examples: {len(x_train)}")
         print(f"Validation examples: {len(x_val)}")
         print(f"Input features: {x_train.shape[1]}")
-        print(f"Rain event: rain_mm >= {RAIN_THRESHOLD_MM}")
         print("Training one classifier per forecast horizon.")
 
-        scaler = StandardScaler()
-        train_scaled = scaler.fit_transform(x_train)
-        val_scaled = scaler.transform(x_val)
-
         models = {}
-        training_frequencies = {}
+        frequencies = {}
         probability_columns = {}
-        baseline_columns = {}
         score_rows = []
         calibration_rows = []
 
@@ -207,45 +274,42 @@ def main():
             labels = y_train[column].to_numpy()
             actual = y_val[column].to_numpy()
             frequency = float(labels.mean())
-
-            training_frequencies[column] = frequency
+            frequencies[column] = frequency
 
             print(
-                f"\nHorizon +{horizon}h — "
-                f"training rain examples: {int(labels.sum())}",
+                f"\nTraining +{horizon}h — "
+                f"rain examples: {int(labels.sum())}",
                 flush=True,
             )
 
             if np.unique(labels).size < 2:
-                # A classifier cannot learn two classes from one class.
                 model = None
                 probabilities = np.full(len(x_val), frequency)
-                print("Single training class; using constant probability.")
             else:
-                model = LogisticRegression(
-                    C=1.0,
-                    solver="lbfgs",
-                    max_iter=2000,
-                    class_weight=None,
-                )
+                if args.model == "random_forest":
+                    model = RandomForestClassifier(**RF_PARAMETERS)
+                else:
+                    model = LogisticRegression(
+                        C=1.0,
+                        solver="lbfgs",
+                        max_iter=2000,
+                        class_weight=None,
+                    )
 
-                # Fail explicitly rather than accept an unconverged fit.
                 with warnings.catch_warnings():
                     warnings.simplefilter("error", ConvergenceWarning)
-                    model.fit(train_scaled, labels)
+                    model.fit(train_inputs, labels)
 
                 positive_index = int(
                     np.flatnonzero(model.classes_ == 1)[0]
                 )
-                probabilities = model.predict_proba(val_scaled)[
+                probabilities = model.predict_proba(val_inputs)[
                     :, positive_index
                 ]
 
             models[column] = model
             probability_columns[column] = probabilities
 
-            # Previous-day value for target t+h is at t+h-24.
-            # This is never later than the prediction time t.
             previous_times = (
                 x_val.index + pd.Timedelta(hours=horizon - 24)
             )
@@ -254,11 +318,14 @@ def main():
             ).astype(float)
 
             candidates = {
-                "logistic": probabilities,
+                args.model: probabilities,
                 "always_dry": np.zeros(len(x_val)),
                 "training_frequency": np.full(len(x_val), frequency),
                 "previous_day": previous_day,
             }
+
+            if previous is not None:
+                candidates["logistic"] = previous[column].to_numpy()
 
             for name, candidate in candidates.items():
                 score_rows.append(
@@ -268,15 +335,11 @@ def main():
                         **probability_scores(actual, candidate),
                     }
                 )
-                if name != "logistic":
-                    baseline_columns[f"{name}_{column}"] = candidate
-
-            calibration_rows.extend(
-                reliability_rows(actual, probabilities, horizon)
-            )
+                calibration_rows.extend(
+                    reliability_rows(actual, candidate, horizon, name)
+                )
 
         scores = pd.DataFrame(score_rows)
-
         summary = (
             scores.groupby("model", as_index=False)["brier_score"]
             .mean()
@@ -295,32 +358,37 @@ def main():
         )
 
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-        run_dir = DATA_DIR / "models" / f"rain_logistic_{run_id}"
+        run_dir = (
+            DATA_DIR / "models" / f"rain_{args.model}_{run_id}"
+        )
         run_dir.mkdir(parents=True, exist_ok=False)
 
         metadata = {
+            "model": args.model,
             "rain_event_definition": "rain_mm >= 0.1",
-            "probability_meaning": (
-                "Rain event during the individual target hour; "
-                "not any rain across the entire next 24 hours."
-            ),
+            "probability_meaning": "Rain during each individual target hour",
             "feature_columns": list(x_train.columns),
             "target_columns": TARGET_COLUMNS,
-            "training_frequency_by_target": training_frequencies,
+            "training_frequency_by_target": frequencies,
             "decision_threshold": DECISION_THRESHOLD,
-            "C": 1.0,
-            "class_weight": None,
+            "parameters": (
+                RF_PARAMETERS if args.model == "random_forest"
+                else {
+                    "C": 1.0,
+                    "solver": "lbfgs",
+                    "max_iter": 2000,
+                    "class_weight": None,
+                }
+            ),
             "training_origin_start": x_train.index.min().isoformat(),
             "training_origin_end": x_train.index.max().isoformat(),
             "validation_origin_start": x_val.index.min().isoformat(),
             "validation_origin_end": x_val.index.max().isoformat(),
+            "logistic_comparison_run": args.logistic_run,
             "sklearn_version": sklearn.__version__,
-            "calibration": "Not recalibrated; reliability tables saved",
+            "calibration": "Not recalibrated",
             "test_data_used": False,
-            "source_note": (
-                "Rain labels come from historical ERA5 reanalysis. "
-                "Operational source compatibility still requires validation."
-            ),
+            "source_note": "Rain labels are ERA5 reanalysis estimates.",
             "availability_assumption": (
                 "Features at time t are available at time t; "
                 "publication delays are not simulated."
@@ -334,6 +402,7 @@ def main():
                 "metadata": metadata,
             },
             run_dir / "candidate.joblib",
+            compress=3,
         )
 
         pd.DataFrame(
@@ -342,14 +411,6 @@ def main():
             run_dir / "validation_probabilities.csv",
             index_label="hour_utc",
         )
-
-        pd.DataFrame(
-            baseline_columns, index=x_val.index
-        ).to_csv(
-            run_dir / "baseline_probabilities.csv",
-            index_label="hour_utc",
-        )
-
         scores.to_csv(run_dir / "scores_by_horizon.csv", index=False)
         summary.to_csv(run_dir / "summary.csv", index=False)
         pd.DataFrame(calibration_rows).to_csv(
@@ -363,10 +424,9 @@ def main():
             json.dump(metadata, file, indent=2, allow_nan=False)
 
         print(f"\nSaved to: {run_dir}")
-        print("Classification threshold fixed at 0.5; not tuned.")
-        print("Undefined precision or recall is saved as blank.")
+        print("Threshold fixed at 0.5; not tuned.")
         print("Probability calibration is not yet established.")
-        print("No existing model replaced.")
+        print("Existing models preserved.")
         print("Test data not read. No Hopsworks upload.")
         return 0
 
