@@ -24,14 +24,23 @@ METRICS = [
     "wind_speed_ms",
 ]
 
+ALPHAS = [1.0, 10.0, 100.0, 1000.0, 10000.0]
+
 TARGET_COLUMNS = [
     f"{metric}_t_plus_{horizon}h"
     for horizon in range(1, 25)
     for metric in METRICS
 ]
 
-# Fixed starting value; no hyperparameter search yet.
-ALPHA = 1.0
+# Fixed physical constraints, not learned from validation data.
+BOUNDS = {
+    "us_aqi": (0, None),
+    "temperature_c": (None, None),
+    "precipitation_mm": (0, None),
+    "humidity_pct": (0, 100),
+    "uv_index": (0, None),
+    "wind_speed_ms": (0, None),
+}
 
 
 def load_split(name, start, end):
@@ -51,19 +60,35 @@ def load_split(name, start, end):
         if not df.index.equals(expected):
             raise ValueError(f"Unexpected timestamps in {path.name}.")
 
-        if not df.columns.is_unique:
-            raise ValueError(f"Duplicate columns in {path.name}.")
-
         frames.append(df)
 
     x, y = frames
     y = y[TARGET_COLUMNS]
 
     for frame in (x, y):
+        if not frame.columns.is_unique:
+            raise ValueError(f"Duplicate columns in {name}.")
         if not np.isfinite(frame.to_numpy(dtype=float)).all():
             raise ValueError(f"Missing or invalid values in {name}.")
 
     return x, y
+
+
+def apply_bounds(predictions):
+    bounded = predictions.copy()
+
+    for metric in METRICS:
+        columns = [
+            f"{metric}_t_plus_{horizon}h"
+            for horizon in range(1, 25)
+        ]
+        lower, upper = BOUNDS[metric]
+        if lower is not None or upper is not None:
+            bounded[columns] = bounded[columns].clip(
+                lower=lower, upper=upper
+            )
+
+    return bounded
 
 
 def main():
@@ -71,17 +96,14 @@ def main():
         x_train, y_train = load_split(
             "train", "2025-11-08", "2026-07-31"
         )
-        x_validation, y_validation = load_split(
+        x_val, y_val = load_split(
             "validation", "2026-08-01", "2026-09-30"
         )
 
-        if list(x_train.columns) != list(x_validation.columns):
-            raise ValueError("Training and validation features differ.")
+        if list(x_train.columns) != list(x_val.columns):
+            raise ValueError("Feature columns differ between splits.")
 
-        if (
-            x_train.index.max() + pd.Timedelta(hours=24)
-            >= x_validation.index.min()
-        ):
+        if x_train.index.max() + pd.Timedelta(hours=24) >= x_val.index.min():
             raise ValueError("Training targets overlap validation.")
 
         baseline = pd.read_csv(
@@ -100,140 +122,188 @@ def main():
         if len(baseline) != len(expected_keys) or actual_keys != expected_keys:
             raise ValueError("Baseline results are incomplete or duplicated.")
 
-        print(f"Training examples: {len(x_train)}")
-        print(f"Validation examples: {len(x_validation)}")
-        print(f"Input features: {len(x_train.columns)}")
-        print(f"Continuous targets: {len(TARGET_COLUMNS)}")
-        print(f"\nTraining Ridge with alpha={ALPHA}...", flush=True)
+        if not np.isfinite(baseline["rmse"].to_numpy(dtype=float)).all():
+            raise ValueError("Invalid baseline RMSE values.")
 
-        model = Pipeline(
-            [
-                ("scaler", StandardScaler()),
-                ("ridge", Ridge(alpha=ALPHA, solver="svd")),
+        models = {}
+        predictions_by_alpha = {}
+        scores = []
+
+        print(f"Training rows: {len(x_train)}")
+        print(f"Validation rows: {len(x_val)}")
+
+        for alpha in ALPHAS:
+            print(f"\nTraining Ridge: alpha={alpha}", flush=True)
+
+            model = Pipeline(
+                [
+                    ("scaler", StandardScaler()),
+                    ("ridge", Ridge(alpha=alpha, solver="svd")),
+                ]
+            )
+            model.fit(x_train, y_train)
+
+            raw = pd.DataFrame(
+                model.predict(x_val),
+                index=x_val.index,
+                columns=TARGET_COLUMNS,
+            )
+
+            if not np.isfinite(raw.to_numpy()).all():
+                raise ValueError("Non-finite model predictions.")
+
+            bounded = apply_bounds(raw)
+            models[alpha] = model
+            predictions_by_alpha[alpha] = bounded
+
+            for variant, predictions in (
+                ("raw", raw),
+                ("bounded", bounded),
+            ):
+                for metric in METRICS:
+                    for horizon in range(1, 25):
+                        column = f"{metric}_t_plus_{horizon}h"
+                        scores.append(
+                            {
+                                "alpha": alpha,
+                                "variant": variant,
+                                "metric": metric,
+                                "horizon_hours": horizon,
+                                **regression_scores(
+                                    y_val[column].to_numpy(),
+                                    predictions[column].to_numpy(),
+                                ),
+                            }
+                        )
+
+        scores = pd.DataFrame(scores)
+
+        # Each metric is selected separately: never average different units.
+        averages = (
+            scores.loc[scores["variant"].eq("bounded")]
+            .groupby(["metric", "alpha"], as_index=False)["rmse"]
+            .mean()
+            .rename(columns={"rmse": "mean_horizon_rmse"})
+        )
+
+        best = (
+            averages.sort_values(
+                ["metric", "mean_horizon_rmse", "alpha"]
+            )
+            .drop_duplicates("metric")
+            .set_index("metric")
+        )
+
+        baseline_means = baseline.groupby("metric")["rmse"].mean()
+
+        summary_rows = []
+        selected_scores = []
+        prediction_parts = []
+        selected_alphas = {}
+
+        for metric in METRICS:
+            alpha = float(best.loc[metric, "alpha"])
+            ridge_rmse = float(best.loc[metric, "mean_horizon_rmse"])
+            baseline_rmse = float(baseline_means.loc[metric])
+
+            selected_alphas[metric] = alpha
+
+            columns = [
+                f"{metric}_t_plus_{horizon}h"
+                for horizon in range(1, 25)
             ]
-        )
+            prediction_parts.append(
+                predictions_by_alpha[alpha][columns]
+            )
 
-        model.fit(x_train, y_train)
+            selected_scores.append(
+                scores.loc[
+                    scores["variant"].eq("bounded")
+                    & scores["metric"].eq(metric)
+                    & scores["alpha"].eq(alpha)
+                ]
+            )
 
-        predictions = pd.DataFrame(
-            model.predict(x_validation),
-            index=x_validation.index,
-            columns=TARGET_COLUMNS,
-        )
+            summary_rows.append(
+                {
+                    "metric": metric,
+                    "selected_alpha": alpha,
+                    "ridge_mean_rmse": ridge_rmse,
+                    "baseline_mean_rmse": baseline_rmse,
+                    "provisional_choice": (
+                        "ridge" if ridge_rmse < baseline_rmse else "baseline"
+                    ),
+                }
+            )
 
-        if not np.isfinite(predictions.to_numpy()).all():
-            raise ValueError("Model generated non-finite predictions.")
+        selected_predictions = pd.concat(
+            prediction_parts, axis=1
+                ).loc[:, TARGET_COLUMNS]
 
-        # Evaluate raw predictions first, without hiding invalid ranges.
-        score_rows = []
+        summary = pd.DataFrame(summary_rows)
+        selected_scores = pd.concat(selected_scores, ignore_index=True)
 
-        for horizon in range(1, 25):
-            for metric in METRICS:
-                column = f"{metric}_t_plus_{horizon}h"
-                score_rows.append(
-                    {
-                        "metric": metric,
-                        "horizon_hours": horizon,
-                        **regression_scores(
-                            y_validation[column].to_numpy(),
-                            predictions[column].to_numpy(),
-                        ),
-                    }
-                )
-
-        scores = pd.DataFrame(score_rows)
-
-        comparison = scores.merge(
+        comparison = selected_scores.merge(
             baseline[["metric", "horizon_hours", "mae", "rmse", "r2"]],
             on=["metric", "horizon_hours"],
             validate="one_to_one",
             suffixes=("_ridge", "_baseline"),
         )
 
-        comparison["ridge_better_rmse"] = (
-            comparison["rmse_ridge"] < comparison["rmse_baseline"]
-        )
+        print("\nSelection using mean RMSE across 24 horizons:")
+        print(summary.round(4).to_string(index=False))
 
-        print("\nValidation comparison at +24 hours:")
+        print("\nSelected bounded Ridge results at +24 hours:")
         print(
             comparison.loc[
                 comparison["horizon_hours"].eq(24),
                 [
                     "metric",
+                    "alpha",
                     "mae_ridge",
                     "rmse_ridge",
                     "rmse_baseline",
                     "r2_ridge",
-                    "ridge_better_rmse",
                 ],
             ].round(4).to_string(index=False)
         )
 
-        print("\nHorizons with lower RMSE than the baseline:")
-        wins = comparison.groupby("metric")["ridge_better_rmse"].sum()
-        for metric in METRICS:
-            print(f"{metric}: {int(wins[metric])}/24")
-
-        print("\nRaw predictions outside physical bounds:")
-        invalid_rows = []
-
-        for metric in METRICS:
-            columns = [
-                f"{metric}_t_plus_{horizon}h"
-                for horizon in range(1, 25)
-            ]
-            values = predictions[columns].to_numpy()
-
-            if metric == "temperature_c":
-                continue
-
-            invalid = values < 0
-            if metric == "humidity_pct":
-                invalid |= values > 100
-
-            count = int(invalid.sum())
-            print(f"{metric}: {count}/{values.size}")
-
-            invalid_rows.append(
-                {
-                    "metric": metric,
-                    "invalid_predictions": count,
-                    "total_predictions": values.size,
-                }
-            )
-
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-        run_dir = DATA_DIR / "models" / f"ridge_{run_id}"
+        run_dir = DATA_DIR / "models" / f"ridge_tuned_{run_id}"
         run_dir.mkdir(parents=True, exist_ok=False)
+
+        # Keep the selected pipelines, plus the metadata needed for inference.
+        selected_models = {
+            alpha: models[alpha]
+            for alpha in sorted(set(selected_alphas.values()))
+        }
 
         joblib.dump(
             {
-                "pipeline": model,
+                "pipelines_by_alpha": selected_models,
+                "selected_alpha_by_metric": selected_alphas,
                 "feature_columns": list(x_train.columns),
                 "target_columns": TARGET_COLUMNS,
+                "bounds": BOUNDS,
+                "selection_rule": "mean validation RMSE across 24 horizons",
                 "sklearn_version": sklearn.__version__,
-                "alpha": ALPHA,
-                "prediction_postprocessing": "none",
-                "training_start": x_train.index.min().isoformat(),
-                "training_end": x_train.index.max().isoformat(),
-                "validation_start": x_validation.index.min().isoformat(),
-                "validation_end": x_validation.index.max().isoformat(),
+                "provisional_choices": summary.to_dict("records"),
             },
             run_dir / "candidate.joblib",
         )
 
-        predictions.to_csv(
-            run_dir / "validation_predictions.csv",
+        scores.to_csv(run_dir / "all_raw_and_bounded_scores.csv", index=False)
+        summary.to_csv(run_dir / "selection_summary.csv", index=False)
+        comparison.to_csv(run_dir / "selected_comparison.csv", index=False)
+        selected_predictions.to_csv(
+            run_dir / "selected_ridge_validation_predictions.csv",
             index_label="hour_utc",
         )
-        comparison.to_csv(run_dir / "validation_comparison.csv", index=False)
-        pd.DataFrame(invalid_rows).to_csv(
-            run_dir / "prediction_bounds.csv", index=False
-        )
 
-        print(f"\nCandidate model and results saved to: {run_dir}")
-        print("No existing model replaced.")
-        print("Test data not read. No Hopsworks upload.")
+        print(f"\nSaved to: {run_dir}")
+        print("Saved predictions are bounded Ridge candidates only.")
+        print("No production model replaced. No test data read.")
+        print("No Hopsworks upload.")
 
     except (ValueError, KeyError, TypeError) as error:
         print(f"Training failed: {error}")
