@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,26 +16,10 @@ SOURCE_PATH = (
 )
 OUTPUT_DIR = BASE_DIR / "data" / "diagnostics"
 
-VARIABLES = {
-    "temperature_2m": "temperature_c",
-    "relative_humidity_2m": "humidity_pct",
-}
+COLUMNS = ["temperature_c", "humidity_pct"]
 
 
 def main():
-    params = {
-        "latitude": 24.8607,
-        "longitude": 67.0011,
-        "start_date": DAY,
-        "end_date": DAY,
-        "hourly": ",".join(VARIABLES),
-        "models": "era5",
-        "timezone": "UTC",
-        "wind_speed_unit": "ms",
-        "precipitation_unit": "mm",
-        "temperature_unit": "celsius",
-    }
-
     try:
         saved = pd.read_csv(SOURCE_PATH)
         saved["hour_utc"] = pd.to_datetime(
@@ -45,18 +28,28 @@ def main():
 
         start = pd.Timestamp(DAY, tz="UTC")
         end = start + pd.Timedelta(days=1)
+        expected = pd.date_range(start, periods=24, freq="h")
 
         saved = saved.loc[
             (saved["hour_utc"] >= start)
             & (saved["hour_utc"] < end)
         ].sort_values("hour_utc")
 
-        expected = pd.date_range(start, periods=24, freq="h")
-
         if not pd.DatetimeIndex(saved["hour_utc"]).equals(expected):
-            raise ValueError("Saved data does not contain the expected 24 hours.")
+            raise ValueError("Saved ERA5 timestamps are incomplete.")
 
-        print(f"Fetching a fresh ERA5 response for {DAY} (UTC)...")
+        params = {
+            "latitude": 24.8607,
+            "longitude": 67.0011,
+            "start_date": DAY,
+            "end_date": DAY,
+            "hourly": "temperature_2m,relative_humidity_2m",
+            "models": "era5_land",
+            "timezone": "UTC",
+            "temperature_unit": "celsius",
+        }
+
+        print(f"Comparing saved ERA5 with ERA5-Land for {DAY}...")
 
         response = requests.get(
             "https://archive-api.open-meteo.com/v1/archive",
@@ -66,90 +59,39 @@ def main():
         response.raise_for_status()
         data = response.json()
 
-        # Preserve the fresh response before performing comparisons.
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-        raw_path = OUTPUT_DIR / f"era5_response_{DAY}_{run_id}.json"
-
-        raw_path.write_text(
-            json.dumps(
-                {
-                    "retrieved_at_utc": datetime.now(UTC).isoformat(),
-                    "request_parameters": params,
-                    "response": data,
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        print(f"Fresh response saved to: {raw_path}")
-
         if data["utc_offset_seconds"] != 0:
-            raise ValueError("The response has an unexpected timezone offset.")
+            raise ValueError("Unexpected timezone offset.")
 
         hourly = data["hourly"]
-        fresh = pd.DataFrame(
+        land = pd.DataFrame(
             {
                 "hour_utc": pd.to_datetime(
                     hourly["time"], utc=True, errors="raise"
                 ),
-                **{
-                    column: hourly[variable]
-                    for variable, column in VARIABLES.items()
-                },
+                "temperature_c": hourly["temperature_2m"],
+                "humidity_pct": hourly["relative_humidity_2m"],
             }
         ).sort_values("hour_utc")
 
-        if not pd.DatetimeIndex(fresh["hour_utc"]).equals(expected):
-            raise ValueError("Fresh response does not contain the expected hours.")
+        if not pd.DatetimeIndex(land["hour_utc"]).equals(expected):
+            raise ValueError("ERA5-Land timestamps are incomplete.")
 
-        print("\nGrid coordinates:")
-        grid_matches = True
+        for frame in (saved, land):
+            for column in COLUMNS:
+                frame[column] = pd.to_numeric(
+                    frame[column], errors="raise"
+                )
+            if not np.isfinite(
+                frame[COLUMNS].to_numpy(dtype=float)
+            ).all():
+                raise ValueError("Missing or non-finite metric values.")
 
-        for column, response_key in (
-            ("grid_latitude", "latitude"),
-            ("grid_longitude", "longitude"),
-        ):
-            old_values = pd.to_numeric(saved[column], errors="raise")
-            new_value = float(data[response_key])
-            matches = np.isclose(
-                old_values.to_numpy(), new_value, rtol=0, atol=1e-6
-            ).all()
-            grid_matches = grid_matches and bool(matches)
-
-            print(
-                f"{column}: saved={old_values.unique().tolist()}, "
-                f"fresh={new_value}, match={bool(matches)}"
-            )
-
-        comparison = saved[["hour_utc", *VARIABLES.values()]].merge(
-            fresh,
+        comparison = saved[["hour_utc", *COLUMNS]].merge(
+            land,
             on="hour_utc",
             validate="one_to_one",
-            suffixes=("_saved", "_fresh"),
+            suffixes=("_era5", "_era5_land"),
         )
-
-        values_match = True
-
-        print("\nValue comparison:")
-        for column in VARIABLES.values():
-            old = pd.to_numeric(
-                comparison[f"{column}_saved"], errors="raise"
-            )
-            new = pd.to_numeric(
-                comparison[f"{column}_fresh"], errors="raise"
-            )
-
-            if not np.isfinite(old).all() or not np.isfinite(new).all():
-                raise ValueError(f"Missing or non-finite values in {column}.")
-
-            matches = np.isclose(old, new, rtol=0, atol=1e-9)
-            values_match = values_match and bool(matches.all())
-
-            comparison[f"{column}_difference"] = new - old
-            print(f"{column}: {matches.sum()}/24 match")
-            print(f"Maximum absolute difference: {(new - old).abs().max():.4f}")
 
         comparison["time_pkt"] = (
             comparison["hour_utc"]
@@ -157,34 +99,62 @@ def main():
             .dt.strftime("%Y-%m-%d %H:%M")
         )
 
-        print("\nFresh readings in Karachi time:")
+        print("\nGrid coordinates:")
+        print(
+            "Saved ERA5:",
+            saved[["grid_latitude", "grid_longitude"]]
+            .drop_duplicates()
+            .to_dict("records"),
+        )
+        print(
+            f"ERA5-Land: latitude={data['latitude']}, "
+            f"longitude={data['longitude']}"
+        )
+
+        print("\nHourly comparison:")
         print(
             comparison[
-                ["time_pkt", "temperature_c_fresh", "humidity_pct_fresh"]
+                [
+                    "time_pkt",
+                    "temperature_c_era5",
+                    "temperature_c_era5_land",
+                    "humidity_pct_era5",
+                    "humidity_pct_era5_land",
+                ]
             ].to_string(index=False)
         )
 
-        comparison_path = OUTPUT_DIR / f"era5_comparison_{DAY}_{run_id}.csv"
-        comparison.to_csv(comparison_path, index=False)
+        print("\nLargest absolute temperature change between adjacent hours:")
+        for model in ("era5", "era5_land"):
+            column = f"temperature_c_{model}"
+            changes = comparison[column].diff()
+            largest = changes.abs().idxmax()
+            print(
+                f"{model}: {changes.loc[largest]:+.2f} °C "
+                f"at {comparison.loc[largest, 'time_pkt']} PKT"
+            )
 
-        print(f"\nComparison saved to: {comparison_path}")
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+        output_path = OUTPUT_DIR / f"era5_land_comparison_{DAY}_{run_id}.csv"
 
-        if grid_matches and values_match:
-            print("Fresh API values and grid coordinates match the saved data.")
-            print("This confirms reproducibility, not independent accuracy.")
-        else:
-            print("Differences found. Review them before changing training data.")
+        comparison["era5_land_grid_latitude"] = data["latitude"]
+        comparison["era5_land_grid_longitude"] = data["longitude"]
+        comparison.to_csv(output_path, index=False)
 
-        print("Training files unchanged. No Hopsworks upload.")
+        print(f"\nComparison saved to: {output_path}")
+        print("Different grid locations can contribute to differences.")
+        print("A smoother series alone does not prove greater accuracy.")
+        print("Training data unchanged. No Hopsworks upload.")
 
     except requests.exceptions.RequestException:
         print("API request failed. Check your connection and retry later.")
         raise SystemExit(1) from None
     except (ValueError, KeyError, TypeError) as error:
-        print(f"Verification failed: {error}")
+        print(f"Comparison failed: {error}")
         raise SystemExit(1) from None
     except OSError:
-        print("File access failed. Check paths and folder permissions.")
+        print("File access failed. Check file paths and permissions.")
         raise SystemExit(1) from None
 
 
