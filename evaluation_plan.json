@@ -1,0 +1,100 @@
+{
+  "plan_version": 1,
+  "status": "frozen_before_test_evaluation",
+  "forecast_horizons_hours": [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+  ],
+  "test_period": {
+    "first_prediction_time_utc": "2026-10-01T00:00:00+00:00",
+    "last_prediction_time_utc": "2026-10-30T23:00:00+00:00",
+    "last_target_time_utc": "2026-10-31T23:00:00+00:00",
+    "expected_prediction_times": 720
+  },
+  "selected_models": {
+    "us_aqi": {
+      "model": "random_forest",
+      "directory": "data/models/random_forest_20261120T135049251958"
+    },
+    "temperature_c": {
+      "model": "sarimax",
+      "directory": "data/models/sarimax_20261120T141127482438/temperature_c"
+    },
+    "precipitation_mm": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/precipitation_mm"
+    },
+    "humidity_pct": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/humidity_pct"
+    },
+    "uv_index": {
+      "model": "random_forest",
+      "directory": "data/models/random_forest_20261120T135049251958"
+    },
+    "wind_speed_ms": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/wind_speed_ms"
+    },
+    "rain_probability": {
+      "model": "random_forest",
+      "directory": "data/models/rain_random_forest_20261120T190019747084"
+    },
+    "wind_direction_deg": {
+      "model": "ridge",
+      "directory": "data/models/wind_direction_ridge_20261120T191558239804"
+    }
+  },
+  "evaluation_rules": {
+    "retrain_before_test": false,
+    "refit_scalers": false,
+    "change_models_using_test_results": false,
+    "use_saved_bounds": true,
+    "forecast_method": "Rolling hourly forecasts using observations through prediction time t only",
+    "sarimax_state": "Reconstruct from training observations using saved parameters; update through validation and then through each test prediction time without parameter refitting",
+    "lstm_history": "Use the saved lookback window ending at prediction time t",
+    "feature_order": "Require the saved feature names and order",
+    "availability_assumption": "Observations for time t are assumed available at time t; actual publication delays are not simulated"
+  },
+  "continuous_metrics": {
+    "primary": "Mean RMSE across the 24 horizons, separately for each metric",
+    "additional": ["MAE", "RMSE", "R2"],
+    "reporting": "Report each horizon and a separate +24-hour summary",
+    "baseline": "Previous-day value at t+h-24",
+    "precipitation_extra_baselines": [
+      "Zero precipitation",
+      "Mean precipitation from training observations only"
+    ]
+  },
+  "rain_probability": {
+    "event_definition": "rain_mm >= 0.1 during the individual target hour",
+    "primary": "Mean Brier score across the 24 horizons",
+    "baselines": [
+      "Always dry",
+      "Saved training rain frequency for each horizon",
+      "Previous-day rain event"
+    ],
+    "calibration": "Use existing uncalibrated probabilities; report reliability using fixed bins of width 0.1",
+    "diagnostic_classification_threshold": 0.5,
+    "diagnostic_metrics": ["precision", "recall", "F1"],
+    "operational_alert_threshold": null,
+    "threshold_note": "The diagnostic threshold is not an approved alert threshold; do not tune thresholds using test results"
+  },
+  "wind_direction": {
+    "primary": "Mean angular MAE across the 24 horizons",
+    "additional": ["Angular RMSE"],
+    "baseline": "Previous-day direction at t+h-24",
+    "evaluation_mask": "Use common rows with non-calm target and baseline wind and a valid predicted direction vector",
+    "calm_threshold_ms": 0.0,
+    "vector_epsilon": 1e-8,
+    "report_excluded_rows": true,
+    "future_speed_usage": "Evaluation masking only, never a prediction input"
+  },
+  "limitations": [
+    "Historical weather targets are ERA5 reanalysis estimates",
+    "Air-quality targets are CAMS model estimates, not station measurements",
+    "October is one test month and cannot establish year-round performance",
+    "Overlapping forecast windows are not independent observations",
+    "Saved-model verification confirms reproduction, not forecasting accuracy"
+  ]
+}
