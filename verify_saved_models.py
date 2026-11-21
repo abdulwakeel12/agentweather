@@ -1,3 +1,4 @@
+import argparse
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -5,8 +6,6 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from train_statistical import load_frame
 
@@ -17,53 +16,34 @@ MODEL_DIR = DATA_DIR / "models"
 RF_RUN = "random_forest_20261120T135049251958"
 SARIMAX_RUN = "sarimax_20261120T141127482438"
 LSTM_RUN = "lstm_20261120T175340139816"
+RAIN_RUN = "rain_random_forest_20261120T190019747084"
+WIND_RUN = "wind_direction_ridge_20261120T191558239804"
 
-VALIDATION_START = "2026-08-01"
-VALIDATION_END = "2026-09-30"
-
-RF_METRICS = ["us_aqi", "uv_index"]
-LSTM_METRICS = [
-    "precipitation_mm",
-    "humidity_pct",
-    "wind_speed_ms",
-]
-
-# Small numerical differences can occur after loading a model.
-# Tolerances are fixed before checking the predictions.
-TOLERANCES = {
-    "random_forest": (1e-8, 1e-8),
-    "sarimax": (1e-7, 1e-7),
-    "lstm": (1e-5, 1e-5),
-}
+START = "2026-08-01"
+END = "2026-09-30"
 
 
-def target_columns(metric):
-    return [
-        f"{metric}_t_plus_{horizon}h"
-        for horizon in range(1, 25)
-    ]
+def columns_for(metric):
+    return [f"{metric}_t_plus_{h}h" for h in range(1, 25)]
 
 
 def read_json(path):
-    with path.open("r", encoding="utf-8") as file:
+    with path.open(encoding="utf-8") as file:
         return json.load(file)
 
 
-def read_saved_predictions(path, metric):
-    frame = load_frame(
-        path,
-        VALIDATION_START,
-        VALIDATION_END,
-    )
-    frame = frame[target_columns(metric)]
-
-    if not np.isfinite(frame.to_numpy(dtype=float)).all():
-        raise ValueError(f"Invalid saved predictions: {path}")
-
-    return frame
+def read_validation(path):
+    return load_frame(path, START, END)
 
 
-def apply_bounds(values, bounds):
+def check_features(features, expected):
+    if list(features.columns) != list(expected):
+        raise ValueError("Saved feature names/order differ from validation.")
+    if not np.isfinite(features.to_numpy(dtype=float)).all():
+        raise ValueError("Non-finite validation features.")
+
+
+def bounded(values, bounds):
     lower, upper = bounds
     return np.clip(
         values,
@@ -72,263 +52,335 @@ def apply_bounds(values, bounds):
     )
 
 
-def compare_predictions(model_name, metric, predicted, saved):
+def compare(model, metric, predicted, saved, atol, rtol=0, angular=False):
     if not predicted.index.equals(saved.index):
-        raise ValueError(f"{metric}: prediction timestamps differ.")
-
+        raise ValueError(f"{metric}: timestamps differ.")
     if list(predicted.columns) != list(saved.columns):
-        raise ValueError(f"{metric}: prediction columns differ.")
+        raise ValueError(f"{metric}: columns differ.")
 
-    actual_values = predicted.to_numpy(dtype=float)
-    saved_values = saved.to_numpy(dtype=float)
+    new = predicted.to_numpy(dtype=float)
+    old = saved.to_numpy(dtype=float)
 
-    if not np.isfinite(actual_values).all():
-        raise ValueError(f"{metric}: non-finite reloaded predictions.")
+    if np.isinf(new).any() or np.isinf(old).any():
+        raise ValueError(f"{metric}: infinite predictions.")
 
-    atol, rtol = TOLERANCES[model_name]
-    matches = np.isclose(
-        actual_values,
-        saved_values,
-        atol=atol,
-        rtol=rtol,
+    if not angular and (np.isnan(new).any() or np.isnan(old).any()):
+        raise ValueError(f"{metric}: unexpected missing predictions.")
+
+    finite = np.isfinite(new) & np.isfinite(old)
+    both_missing = np.isnan(new) & np.isnan(old)
+    differences = np.full(new.shape, np.nan)
+
+    if angular:
+        for values in (new, old):
+            valid = values[np.isfinite(values)]
+            if ((valid < 0) | (valid > 360)).any():
+                raise ValueError("Wind direction outside 0–360 degrees.")
+        differences[finite] = np.abs(
+            (new[finite] - old[finite] + 180) % 360 - 180
+        )
+    else:
+        differences[finite] = np.abs(new[finite] - old[finite])
+
+    matches = both_missing.copy()
+    matches[finite] = (
+        differences[finite] <= atol + rtol * np.abs(old[finite])
     )
-    differences = np.abs(actual_values - saved_values)
-    passed = bool(matches.all())
+    passed = bool(matches.all() and finite.any())
+    maximum = float(differences[finite].max()) if finite.any() else np.nan
 
     row = {
-        "model": model_name,
+        "model": model,
         "metric": metric,
         "prediction_times": len(saved),
         "values_checked": int(matches.size),
         "values_matching": int(matches.sum()),
-        "max_absolute_difference": float(differences.max()),
+        "both_undefined": int(both_missing.sum()),
+        "max_absolute_difference": maximum,
         "absolute_tolerance": atol,
         "relative_tolerance": rtol,
         "passed": passed,
     }
-
     print(
-        f"{metric}: {'PASS' if passed else 'FAIL'} "
-        f"— {matches.sum()}/{matches.size} values match; "
-        f"maximum difference={differences.max():.10g}",
+        f"{metric}: {'PASS' if passed else 'FAIL'} — "
+        f"{matches.sum()}/{matches.size} match; "
+        f"maximum difference={maximum:.10g}",
         flush=True,
     )
     return row
 
 
-def verify_random_forest():
-    print("\nChecking saved Random Forest models...", flush=True)
+def verify_rain(features):
+    print("\nChecking saved rain-probability models...", flush=True)
+    folder = MODEL_DIR / RAIN_RUN
+    artifact = joblib.load(folder / "candidate.joblib")
+    metadata = artifact["metadata"]
+    columns = columns_for("rain_event")
 
-    run_dir = MODEL_DIR / RF_RUN
-    artifact = joblib.load(run_dir / "candidate.joblib")
+    check_features(features, metadata["feature_columns"])
+    if metadata["model"] != "random_forest":
+        raise ValueError("Unexpected rain model.")
+    if metadata["target_columns"] != columns:
+        raise ValueError("Unexpected rain target order.")
+    if set(artifact["models_by_target"]) != set(columns):
+        raise ValueError("Missing or unexpected rain models.")
 
-    features = load_frame(
-        DATA_DIR / "supervised" / "validation_X.csv",
-        VALIDATION_START,
-        VALIDATION_END,
+    scaler = artifact["scaler"]
+    inputs = features if scaler is None else scaler.transform(features)
+    parts = {}
+
+    for column in columns:
+        model = artifact["models_by_target"][column]
+        if model is None:
+            frequency = metadata["training_frequency_by_target"][column]
+            probabilities = np.full(len(features), float(frequency))
+        else:
+            positive = np.flatnonzero(np.asarray(model.classes_) == 1)
+            if len(positive) != 1:
+                raise ValueError(f"Missing positive rain class: {column}")
+            probabilities = model.predict_proba(inputs)[:, positive[0]]
+
+        parts[column] = probabilities
+
+    predicted = pd.DataFrame(parts, index=features.index)
+    saved = read_validation(folder / "validation_probabilities.csv")
+
+    if list(saved.columns) != columns:
+        raise ValueError("Saved rain probability columns differ.")
+
+    for frame in (predicted, saved):
+        values = frame.to_numpy(dtype=float)
+        if (
+            not np.isfinite(values).all()
+            or (values < 0).any()
+            or (values > 1).any()
+        ):
+            raise ValueError("Invalid rain probabilities.")
+
+    return compare(
+        "random_forest", "rain_probability",
+        predicted, saved, atol=1e-10, rtol=1e-8,
     )
 
-    if list(features.columns) != artifact["feature_columns"]:
-        raise ValueError("Random Forest feature names/order differ.")
 
-    if not np.isfinite(features.to_numpy(dtype=float)).all():
-        raise ValueError("Invalid Random Forest input features.")
+def verify_wind(features):
+    print("\nChecking saved wind-direction models...", flush=True)
+    folder = MODEL_DIR / WIND_RUN
+    artifact = joblib.load(folder / "candidate.joblib")
+    metadata = artifact["metadata"]
 
+    check_features(features, metadata["feature_columns"])
+    if metadata["component_order"] != ["sin", "cos"]:
+        raise ValueError("Unexpected wind component order.")
+    if set(artifact["pipelines_by_horizon"]) != {
+        str(h) for h in range(1, 25)
+    }:
+        raise ValueError("Missing or unexpected wind models.")
+
+    epsilon = float(metadata["vector_epsilon"])
+    if not np.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("Invalid wind vector threshold.")
+
+    directions = {}
+    components = {}
+
+    for horizon in range(1, 25):
+        model = artifact["pipelines_by_horizon"][str(horizon)]
+        values = model.predict(features)
+
+        if (
+            values.shape != (len(features), 2)
+            or not np.isfinite(values).all()
+        ):
+            raise ValueError(f"Invalid wind output at +{horizon}h.")
+
+        sine, cosine = values[:, 0], values[:, 1]
+        magnitude = np.hypot(sine, cosine)
+        angle = np.rad2deg(np.arctan2(sine, cosine)) % 360
+        angle[magnitude <= epsilon] = np.nan
+
+        directions[f"wind_direction_deg_t_plus_{horizon}h"] = angle
+        components[f"predicted_sin_t_plus_{horizon}h"] = sine
+        components[f"predicted_cos_t_plus_{horizon}h"] = cosine
+        components[f"vector_magnitude_t_plus_{horizon}h"] = magnitude
+
+    predicted = pd.DataFrame(directions, index=features.index)
+    saved = read_validation(folder / "validation_predictions.csv")
+
+    # Also verify the components used to calculate the direction.
+    predicted_components = pd.DataFrame(components, index=features.index)
+    diagnostics = read_validation(folder / "validation_diagnostics.csv")
+    saved_components = diagnostics[list(predicted_components.columns)]
+
+    component_result = compare(
+        "ridge", "wind_direction_components",
+        predicted_components, saved_components,
+        atol=1e-8, rtol=1e-8,
+    )
+    direction_result = compare(
+        "ridge", "wind_direction_deg",
+        predicted, saved, atol=1e-5, angular=True,
+    )
+    return [component_result, direction_result]
+
+
+def verify_continuous(features):
+    import tensorflow as tf
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    tf.config.threading.set_intra_op_parallelism_threads(2)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
     rows = []
 
-    for metric in RF_METRICS:
-        columns = target_columns(metric)
+    print("\nChecking continuous Random Forest models...", flush=True)
+    folder = MODEL_DIR / RF_RUN
+    artifact = joblib.load(folder / "candidate.joblib")
+    check_features(features, artifact["feature_columns"])
+    saved_rf = read_validation(folder / "validation_predictions.csv")
 
+    for metric in ("us_aqi", "uv_index"):
+        columns = columns_for(metric)
         if artifact["target_columns_by_metric"][metric] != columns:
-            raise ValueError(f"Unexpected target order for {metric}.")
+            raise ValueError(f"Unexpected target order: {metric}")
 
-        model = artifact["models_by_metric"][metric]
-        values = model.predict(features)
-        values = apply_bounds(values, artifact["bounds"][metric])
-
+        values = artifact["models_by_metric"][metric].predict(features)
         predicted = pd.DataFrame(
-            values,
+            bounded(values, artifact["bounds"][metric]),
             index=features.index,
             columns=columns,
         )
-        saved = read_saved_predictions(
-            run_dir / "validation_predictions.csv", metric
-        )
+        rows.append(compare(
+            "random_forest", metric, predicted, saved_rf[columns],
+            atol=1e-8, rtol=1e-8,
+        ))
 
-        rows.append(
-            compare_predictions(
-                "random_forest", metric, predicted, saved
-            )
-        )
-
-    return rows
-
-
-def verify_sarimax(train, validation):
-    metric = "temperature_c"
-    print("\nReconstructing saved temperature SARIMAX...", flush=True)
-
-    run_dir = MODEL_DIR / SARIMAX_RUN / metric
-    metadata = read_json(run_dir / "model_specification.json")
-    saved = read_saved_predictions(
-        run_dir / "validation_predictions.csv", metric
+    train = load_frame(
+        DATA_DIR / "splits" / "train.csv",
+        "2025-11-01", "2026-08-01",
     )
+    validation = load_frame(
+        DATA_DIR / "splits" / "validation.csv",
+        "2026-08-01", "2026-10-01",
+    )
+    metrics = [
+        "temperature_c", "precipitation_mm",
+        "humidity_pct", "wind_speed_ms",
+    ]
+    for frame in (train, validation):
+        if not np.isfinite(frame[metrics].to_numpy(dtype=float)).all():
+            raise ValueError("Non-finite historical observations.")
 
-    if metadata["metric"] != metric:
-        raise ValueError("Incorrect SARIMAX metric.")
+    print("\nReconstructing temperature SARIMAX...", flush=True)
+    metric = "temperature_c"
+    folder = MODEL_DIR / SARIMAX_RUN / metric
+    metadata = read_json(folder / "model_specification.json")
+    saved = read_validation(folder / "validation_predictions.csv")
+    columns = columns_for(metric)
+
+    if metadata["metric"] != metric or list(saved.columns) != columns:
+        raise ValueError("Unexpected SARIMAX metadata or columns.")
 
     mean = float(metadata["training_mean"])
     scale = float(metadata["training_scale"])
-
     if not np.isfinite([mean, scale]).all() or scale <= 0:
         raise ValueError("Invalid SARIMAX normalization.")
 
-    training_values = train[metric].to_numpy(dtype=float)
-    standardized = (training_values - mean) / scale
-
     model = SARIMAX(
-        standardized,
+        (train[metric].to_numpy(dtype=float) - mean) / scale,
         order=tuple(metadata["order"]),
         seasonal_order=tuple(metadata["seasonal_order"]),
         trend=metadata["trend"],
         enforce_stationarity=metadata["enforce_stationarity"],
         enforce_invertibility=metadata["enforce_invertibility"],
     )
-
     if list(model.param_names) != metadata["parameter_names"]:
-        raise ValueError("SARIMAX parameter names/order differ.")
+        raise ValueError("SARIMAX parameter order differs.")
 
     parameters = np.asarray(metadata["parameters"], dtype=float)
     if not np.isfinite(parameters).all():
-        raise ValueError("Invalid saved SARIMAX parameters.")
+        raise ValueError("Invalid SARIMAX parameters.")
 
-    # Rebuild the filtered state with fixed parameters.
-    # This does not optimize or retrain the model.
     state = model.filter(parameters)
-
-    values = np.empty((len(saved), 24), dtype=float)
+    values = np.empty((len(saved), 24))
     previous_time = train.index[-1]
 
-    for position, prediction_time in enumerate(saved.index):
-        if prediction_time != previous_time + pd.Timedelta(hours=1):
-            raise ValueError("Gap in SARIMAX replay timestamps.")
-
-        observation = float(validation.at[prediction_time, metric])
-        state = state.extend(
-            np.array([(observation - mean) / scale], dtype=float)
-        )
+    for position, origin in enumerate(saved.index):
+        if origin != previous_time + pd.Timedelta(hours=1):
+            raise ValueError("Gap in SARIMAX replay.")
+        observed = float(validation.at[origin, metric])
+        state = state.extend(np.array([(observed - mean) / scale]))
         values[position] = (
-            np.asarray(state.forecast(steps=24), dtype=float)
-            .reshape(-1)
-            * scale
-            + mean
+            np.asarray(state.forecast(24)).reshape(-1) * scale + mean
         )
-        previous_time = prediction_time
-
+        previous_time = origin
         if (position + 1) % 240 == 0:
-            print(
-                f"  Replayed {position + 1}/{len(saved)} prediction times",
-                flush=True,
-            )
+            print(f"  Replayed {position + 1}/{len(saved)}", flush=True)
 
-    values = apply_bounds(values, metadata["bounds"])
     predicted = pd.DataFrame(
-        values,
-        index=saved.index,
-        columns=target_columns(metric),
+        bounded(values, metadata["bounds"]),
+        index=saved.index, columns=columns,
     )
-
-    return compare_predictions("sarimax", metric, predicted, saved)
-
-
-def verify_lstm(train, validation):
-    print("\nChecking saved LSTM models...", flush=True)
+    rows.append(compare(
+        "sarimax", metric, predicted, saved, atol=1e-7, rtol=1e-7
+    ))
 
     history = pd.concat([train, validation])
-    expected = pd.date_range(
-        "2025-11-01",
-        "2026-10-01",
-        inclusive="left",
-        freq="h",
-        tz="UTC",
-    )
-    if not history.index.equals(expected):
-        raise ValueError("LSTM history is not continuous.")
+    print("\nChecking saved LSTM models...", flush=True)
 
-    rows = []
+    for metric in ("precipitation_mm", "humidity_pct", "wind_speed_ms"):
+        folder = MODEL_DIR / LSTM_RUN / metric
+        metadata = read_json(folder / "metadata.json")
+        saved = read_validation(folder / "validation_predictions.csv")
+        columns = columns_for(metric)
 
-    for metric in LSTM_METRICS:
-        run_dir = MODEL_DIR / LSTM_RUN / metric
-        metadata = read_json(run_dir / "metadata.json")
-        saved = read_saved_predictions(
-            run_dir / "validation_predictions.csv", metric
-        )
-        columns = target_columns(metric)
-
-        if metadata["input_columns"] != [metric]:
-            raise ValueError(f"Unexpected LSTM input for {metric}.")
-        if metadata["target_columns"] != columns:
-            raise ValueError(f"Unexpected LSTM output order for {metric}.")
+        if (
+            metadata["input_columns"] != [metric]
+            or metadata["target_columns"] != columns
+            or list(saved.columns) != columns
+        ):
+            raise ValueError(f"Unexpected LSTM columns: {metric}")
 
         mean = float(metadata["training_mean"])
         scale = float(metadata["training_scale"])
         lookback = int(metadata["lookback_hours"])
         batch_size = int(metadata["batch_size"])
-
         if (
             not np.isfinite([mean, scale]).all()
-            or scale <= 0
-            or lookback < 1
-            or batch_size < 1
+            or scale <= 0 or lookback < 1 or batch_size < 1
         ):
-            raise ValueError(f"Invalid LSTM metadata for {metric}.")
+            raise ValueError(f"Invalid LSTM metadata: {metric}")
 
-        values = (
+        standardized = (
             (history[metric].to_numpy(dtype=float) - mean) / scale
         ).astype(np.float32)
         positions = history.index.get_indexer(saved.index)
-
         if (positions < lookback - 1).any():
-            raise ValueError(f"Insufficient LSTM history for {metric}.")
+            raise ValueError("Insufficient LSTM history.")
 
-        inputs = np.empty(
-            (len(saved), lookback, 1), dtype=np.float32
-        )
-        for row, position in enumerate(positions):
-            inputs[row, :, 0] = values[
-                position - lookback + 1 : position + 1
-            ]
-
-        if not np.isfinite(inputs).all():
-            raise ValueError(f"Invalid LSTM inputs for {metric}.")
+        inputs = np.stack([
+            standardized[p - lookback + 1:p + 1]
+            for p in positions
+        ])[:, :, None]
 
         tf.keras.backend.clear_session()
         model = tf.keras.models.load_model(
-            run_dir / "candidate.keras",
-            compile=False,
+            folder / "candidate.keras", compile=False
         )
+        parts = [
+            model(inputs[start:start + batch_size], training=False).numpy()
+            for start in range(0, len(inputs), batch_size)
+        ]
+        values = np.concatenate(parts) * scale + mean
+        if values.shape != (len(saved), 24):
+            raise ValueError("Unexpected LSTM output shape.")
 
-        parts = []
-        for start in range(0, len(inputs), batch_size):
-            batch = inputs[start : start + batch_size]
-            parts.append(model(batch, training=False).numpy())
-
-        predictions = np.concatenate(parts, axis=0) * scale + mean
-
-        if predictions.shape != (len(saved), 24):
-            raise ValueError(f"Unexpected LSTM output shape for {metric}.")
-
-        predictions = apply_bounds(predictions, metadata["bounds"])
         predicted = pd.DataFrame(
-            predictions,
-            index=saved.index,
-            columns=columns,
+            bounded(values, metadata["bounds"]),
+            index=saved.index, columns=columns,
         )
-
-        rows.append(
-            compare_predictions("lstm", metric, predicted, saved)
-        )
-
+        rows.append(compare(
+            "lstm", metric, predicted, saved, atol=1e-5, rtol=1e-5
+        ))
         del model
         tf.keras.backend.clear_session()
 
@@ -336,34 +388,30 @@ def verify_lstm(train, validation):
 
 
 def main():
-    tf.config.threading.set_intra_op_parallelism_threads(2)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
-
-    print("AgentWeather — Saved Model Verification", flush=True)
-    print("Checking all 1,440 validation prediction times.")
-    print("Six selected outputs; 24 forecast hours per output.")
-
-    train = load_frame(
-        DATA_DIR / "splits" / "train.csv",
-        "2025-11-01",
-        "2026-08-01",
+    parser = argparse.ArgumentParser(
+        description="Verify saved AgentWeather predictions without retraining."
     )
-    validation = load_frame(
-        DATA_DIR / "splits" / "validation.csv",
-        "2026-08-01",
-        "2026-10-01",
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Also repeat verification of the six continuous outputs.",
+    )
+    args = parser.parse_args()
+
+    print("AgentWeather — Saved Model Verification")
+    print("Scope:", "all eight forecast outputs" if args.all else
+          "rain probability and wind direction")
+
+    features = read_validation(
+        DATA_DIR / "supervised" / "validation_X.csv"
     )
 
-    required = ["temperature_c", *LSTM_METRICS]
-    for name, frame in (("training", train), ("validation", validation)):
-        if not np.isfinite(frame[required].to_numpy(dtype=float)).all():
-            raise ValueError(f"Invalid {name} observations.")
+    rows = [verify_rain(features)]
+    rows.extend(verify_wind(features))
+    if args.all:
+        rows.extend(verify_continuous(features))
 
-    rows = verify_random_forest()
-    rows.append(verify_sarimax(train, validation))
-    rows.extend(verify_lstm(train, validation))
     results = pd.DataFrame(rows)
-
     output_dir = DATA_DIR / "evaluation"
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
@@ -371,35 +419,23 @@ def main():
     results.to_csv(output, index=False)
 
     print("\nVerification summary:")
-    print(
-        results[
-            ["model", "metric", "values_matching", "values_checked", "passed"]
-        ].to_string(index=False)
-    )
+    print(results[
+        ["metric", "values_matching", "values_checked", "passed"]
+    ].to_string(index=False))
+
     print(f"\nReport saved to: {output}")
-    print("No training, model replacement or Hopsworks upload.")
-    print("Test files were not read.")
-    print("Rain probability and wind direction are not checked by this script.")
+    print("No models trained or replaced.")
+    print("Test files not read. No Hopsworks upload.")
+    print("No rain thresholds changed or calibration performed.")
 
     if not results["passed"].all():
-        print("\nSome predictions differ. Share the output before proceeding.")
+        print("\nFAIL: share the output before proceeding.")
         return 1
 
-    print("\nPASS: all six outputs match within the stated tolerances.")
-    print("This verifies saved-model reproduction, not forecast accuracy.")
+    print("\nPASS: all requested checks matched within tolerance.")
+    print("This verifies reproduction, not forecast accuracy.")
     return 0
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except (
-        ValueError,
-        KeyError,
-        TypeError,
-        OSError,
-        RuntimeError,
-        tf.errors.OpError,
-    ) as error:
-        print(f"\nVerification stopped: {error}")
-        raise SystemExit(1) from None
+    raise SystemExit(main())
