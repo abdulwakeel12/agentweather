@@ -8,7 +8,7 @@ The system produces hourly predictions for the next 24 forecast horizons.
 
 ## Dashboard
 
-**Deployed app:** Add your Streamlit app URL here.
+**Deployed app:** [https://abdulwakeel12-agentweather-deploymentdashboard-vkwvrm.streamlit.app/]
 
 The dashboard contains four sections:
 
