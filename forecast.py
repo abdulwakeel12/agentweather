@@ -379,6 +379,89 @@ class AgentWeatherForecaster:
         return result
 
 
+def build_experimental_baselines(snapshot, forecast):
+    """Create baselines using the same saved inputs as the model forecast."""
+    forecast = forecast.sort_values("horizon_hours").copy()
+
+    if forecast["horizon_hours"].tolist() != list(range(1, 25)):
+        raise ValueError("Expected exactly 24 forecast horizons.")
+
+    for column in (
+        "prediction_time_utc",
+        "valid_time_utc",
+        "generated_at_utc",
+    ):
+        forecast[column] = pd.to_datetime(
+            forecast[column], utc=True, errors="raise"
+        )
+        if forecast[column].isna().any():
+            raise ValueError(f"Missing forecast timestamp: {column}")
+
+    if forecast["prediction_time_utc"].nunique() != 1:
+        raise ValueError("Expected one forecast input cutoff.")
+    if forecast["generated_at_utc"].nunique() != 1:
+        raise ValueError("Expected one forecast generation time.")
+
+    origin = forecast["prediction_time_utc"].iloc[0]
+    generated_at = forecast["generated_at_utc"].iloc[0]
+
+    expected_times = origin + pd.to_timedelta(
+        forecast["horizon_hours"].to_numpy(), unit="h"
+    )
+    if not pd.DatetimeIndex(forecast["valid_time_utc"]).equals(
+        pd.DatetimeIndex(expected_times)
+    ):
+        raise ValueError("Incorrect forecast target timestamps.")
+
+    expected_history = pd.date_range(
+        end=origin, periods=169, freq="h"
+    )
+    if not snapshot.index.equals(expected_history):
+        raise ValueError("Baseline snapshot must contain 169 consecutive hours.")
+
+    metrics = [*CONTINUOUS, "wind_direction_deg"]
+    required = [*metrics, "rain_mm"]
+    inputs = snapshot[required].apply(pd.to_numeric, errors="raise")
+
+    if not np.isfinite(inputs.to_numpy(dtype=float)).all():
+        raise ValueError("Missing or non-finite baseline inputs.")
+
+    rows = []
+    for item in forecast.itertuples(index=False):
+        target = item.valid_time_utc
+
+        for method, source_time in (
+            ("persistence", origin),
+            ("previous_day", target - pd.Timedelta(hours=24)),
+        ):
+            source = inputs.loc[source_time]
+
+            row = {
+                "baseline": method,
+                "prediction_time_utc": origin,
+                "forecast_generated_at_utc": generated_at,
+                "horizon_hours": int(item.horizon_hours),
+                "valid_time_utc": target,
+                "baseline_source_time_utc": source_time,
+                "target_after_generation": bool(target > generated_at),
+                "forecast_mode": "experimental_mixed_source",
+            }
+
+            for metric in metrics:
+                row[metric] = float(source[metric])
+
+            if source["wind_speed_ms"] <= 0:
+                row["wind_direction_deg"] = np.nan
+            else:
+                row["wind_direction_deg"] %= 360
+
+            # Deterministic event predictions, represented as 0 or 1.
+            row["rain_probability"] = float(source["rain_mm"] >= 0.1)
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def experimental_forecast(snapshot_path, history_path):
     """Run a separately labelled experiment using recent GFS inputs."""
     from build_features import METRICS, make_features
@@ -568,6 +651,12 @@ def experimental_forecast(snapshot_path, history_path):
     output_dir = DATA_DIR / "experimental_forecasts" / run_id
     output_dir.mkdir(parents=True, exist_ok=False)
 
+    baselines = build_experimental_baselines(snapshot, result)
+    baselines.to_csv(
+        output_dir / "baseline_predictions.csv", index=False
+    )
+    print("Baseline methods: persistence, previous_day")
+    print("Baseline rows saved:", len(baselines))
     result.to_csv(output_dir / "forecast.csv", index=False)
     features.to_csv(
         output_dir / "features.csv",
