@@ -1,0 +1,57 @@
+{
+  "policy_version": 1,
+  "mode": "retrospective_historical_demo",
+  "prediction_time_utc": "2026-11-15T23:00:00+00:00",
+  "evaluated_at_utc": "2026-11-21T18:09:08.930086+00:00",
+  "forecast_rows_checked": 24,
+  "rules": {
+    "us_aqi": "Unrounded predicted value > 100",
+    "uv_index": "Unrounded predicted value >= 3"
+  },
+  "alerts": [
+    {
+      "metric": "us_aqi",
+      "status": "historical_demo_only",
+      "category_at_peak": "Unhealthy for Sensitive Groups",
+      "first_target_time_utc": "2026-11-16T00:00:00+00:00",
+      "last_target_time_utc": "2026-11-16T23:00:00+00:00",
+      "first_target_time_pkt": "2026-11-16T05:00:00+05:00",
+      "last_target_time_pkt": "2026-11-17T04:00:00+05:00",
+      "flagged_hours": 24,
+      "peak_predicted_value": 105.50085801929784,
+      "peak_target_time_utc": "2026-11-16T12:00:00+00:00",
+      "category_reference": "https://www.airnow.gov/aqi/aqi-basics/",
+      "message": "Historical model predictions crossed the us_aqi demo threshold. This is not a current warning."
+    },
+    {
+      "metric": "uv_index",
+      "status": "historical_demo_only",
+      "category_at_peak": "Moderate",
+      "first_target_time_utc": "2026-11-16T05:00:00+00:00",
+      "last_target_time_utc": "2026-11-16T09:00:00+00:00",
+      "first_target_time_pkt": "2026-11-16T10:00:00+05:00",
+      "last_target_time_pkt": "2026-11-16T14:00:00+05:00",
+      "flagged_hours": 5,
+      "peak_predicted_value": 5.714590807340806,
+      "peak_target_time_utc": "2026-11-16T07:00:00+00:00",
+      "category_reference": "https://www.epa.gov/sunsafety/uv-index-scale-0",
+      "message": "Historical model predictions crossed the uv_index demo threshold. This is not a current warning."
+    }
+  ],
+  "disabled_rules": {
+    "rain": "Probability calibration and operational threshold unresolved.",
+    "temperature": "Local alert policy not yet established.",
+    "humidity": "Alert policy not yet established.",
+    "wind": "Local alert policy and calm-wind handling not yet established."
+  },
+  "limitations": [
+    "Thresholds are applied to model estimates, not measurements.",
+    "These forecasts are historical, not current.",
+    "No alert accuracy assessment has been completed.",
+    "No flagged hours does not establish that conditions were safe."
+  ],
+  "notifications_sent": false,
+  "agent_run_id": "20261121T180851780350_0c35c990",
+  "forecast_file": "D:\\Agentic AI\\agentweather\\data\\forecasts\\agent_forecast_20261121T180851780350_0c35c990.csv",
+  "input_age_hours_at_preparation": 139.1478381372222
+}

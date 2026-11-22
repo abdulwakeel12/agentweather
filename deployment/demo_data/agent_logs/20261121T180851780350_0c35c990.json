@@ -1,0 +1,123 @@
+{
+  "run_id": "20261121T180851780350_0c35c990",
+  "started_at_utc": "2026-11-21T18:08:51.780350+00:00",
+  "status": "success",
+  "mode": "retrospective_historical_demo",
+  "history_path": "D:\\Agentic AI\\agentweather\\data\\inference\\history_through_2026-11-15.csv",
+  "origin_utc": "2026-11-15T23:00:00+00:00",
+  "input_age_hours": 139.1478381372222,
+  "model_versions": {
+    "us_aqi": {
+      "model": "random_forest",
+      "directory": "data/models/random_forest_20261120T135049251958"
+    },
+    "temperature_c": {
+      "model": "sarimax",
+      "directory": "data/models/sarimax_20261120T141127482438/temperature_c"
+    },
+    "precipitation_mm": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/precipitation_mm"
+    },
+    "humidity_pct": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/humidity_pct"
+    },
+    "uv_index": {
+      "model": "random_forest",
+      "directory": "data/models/random_forest_20261120T135049251958"
+    },
+    "wind_speed_ms": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/wind_speed_ms"
+    },
+    "rain_probability": {
+      "model": "random_forest",
+      "directory": "data/models/rain_random_forest_20261120T190019747084"
+    },
+    "wind_direction_deg": {
+      "model": "ridge",
+      "directory": "data/models/wind_direction_ridge_20261120T191558239804"
+    }
+  },
+  "monitoring_path": "D:\\Agentic AI\\agentweather\\data\\monitoring\\agent_monitoring_20261121T180851780350_0c35c990.json",
+  "monitoring_status": "no_screening_flags",
+  "monitoring_quality_passed": true,
+  "flagged_metrics": [],
+  "forecast_path": "D:\\Agentic AI\\agentweather\\data\\forecasts\\agent_forecast_20261121T180851780350_0c35c990.csv",
+  "forecast_rows": 24,
+  "alert_path": "D:\\Agentic AI\\agentweather\\data\\alerts\\agent_alerts_20261121T180851780350_0c35c990.json",
+  "alert_count": 2,
+  "alerts": [
+    {
+      "metric": "us_aqi",
+      "status": "historical_demo_only",
+      "category_at_peak": "Unhealthy for Sensitive Groups",
+      "first_target_time_utc": "2026-11-16T00:00:00+00:00",
+      "last_target_time_utc": "2026-11-16T23:00:00+00:00",
+      "first_target_time_pkt": "2026-11-16T05:00:00+05:00",
+      "last_target_time_pkt": "2026-11-17T04:00:00+05:00",
+      "flagged_hours": 24,
+      "peak_predicted_value": 105.50085801929784,
+      "peak_target_time_utc": "2026-11-16T12:00:00+00:00",
+      "category_reference": "https://www.airnow.gov/aqi/aqi-basics/",
+      "message": "Historical model predictions crossed the us_aqi demo threshold. This is not a current warning."
+    },
+    {
+      "metric": "uv_index",
+      "status": "historical_demo_only",
+      "category_at_peak": "Moderate",
+      "first_target_time_utc": "2026-11-16T05:00:00+00:00",
+      "last_target_time_utc": "2026-11-16T09:00:00+00:00",
+      "first_target_time_pkt": "2026-11-16T10:00:00+05:00",
+      "last_target_time_pkt": "2026-11-16T14:00:00+05:00",
+      "flagged_hours": 5,
+      "peak_predicted_value": 5.714590807340806,
+      "peak_target_time_utc": "2026-11-16T07:00:00+00:00",
+      "category_reference": "https://www.epa.gov/sunsafety/uv-index-scale-0",
+      "message": "Historical model predictions crossed the uv_index demo threshold. This is not a current warning."
+    }
+  ],
+  "report_path": "D:\\Agentic AI\\agentweather\\data\\reports\\agent_report_20261121T180851780350_0c35c990.md",
+  "report_method": "deterministic_template",
+  "events": [
+    {
+      "timestamp_utc": "2026-11-21T18:08:51.915360+00:00",
+      "node": "monitor_inputs",
+      "status": "success",
+      "message": "Input quality passed; no initial distribution screening thresholds were crossed."
+    },
+    {
+      "timestamp_utc": "2026-11-21T18:08:52.217294+00:00",
+      "node": "prepare_inputs",
+      "status": "success",
+      "message": "Historical features and saved models prepared."
+    },
+    {
+      "timestamp_utc": "2026-11-21T18:09:08.897696+00:00",
+      "node": "generate_forecast",
+      "status": "success",
+      "message": "Generated and saved 24 hourly forecasts."
+    },
+    {
+      "timestamp_utc": "2026-11-21T18:09:08.930086+00:00",
+      "node": "evaluate_alerts",
+      "status": "success",
+      "message": "Saved 2 historical alert windows."
+    },
+    {
+      "timestamp_utc": "2026-11-21T18:09:08.950265+00:00",
+      "node": "write_report",
+      "status": "success",
+      "message": "Saved weather report with input-monitoring summary."
+    },
+    {
+      "timestamp_utc": "2026-11-21T18:09:08.951263+00:00",
+      "node": "save_log",
+      "status": "success",
+      "message": "Workflow finished; execution details recorded."
+    }
+  ],
+  "finished_at_utc": "2026-11-21T18:09:08.951263+00:00",
+  "log_path": "D:\\Agentic AI\\agentweather\\data\\agent_logs\\20261121T180851780350_0c35c990.json"
+}

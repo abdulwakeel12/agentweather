@@ -1,0 +1,52 @@
+{
+  "run_id": "20261122T112757805880_3d090c6d",
+  "mode": "experimental_mixed_source",
+  "started_at_utc": "2026-11-22T11:27:57.805880+00:00",
+  "status": "success",
+  "generated_at_utc": "2026-11-22T11:28:27.180384+00:00",
+  "input_cutoff_utc": "2026-11-22T10:00:00+00:00",
+  "source_transition_utc": "2026-11-15T09:00:00+00:00",
+  "snapshot": "data\\recent_inputs\\20261122T112758256680_f5e588c4\\recent_hourly_inputs.csv",
+  "history_rows": 9275,
+  "forecast_rows": 24,
+  "baseline_rows": 48,
+  "input_history_sha256": "3c166e559e341201b1a6034d36ab78909d75ae62f546436dd7b3e5aeaa2c7249",
+  "snapshot_sha256": "7a0b5409ec51141b34a6a8ae906fae640fbe431a180e826e474b1c82c0d2da40",
+  "evaluation_plan_sha256": "d3028ecc42caebfe1b4fd531e0e5afe98b2bf98c48eeb356be08b87deb6c730e",
+  "selected_models": {
+    "us_aqi": {
+      "model": "random_forest",
+      "directory": "data/models/random_forest_20261120T135049251958"
+    },
+    "temperature_c": {
+      "model": "sarimax",
+      "directory": "data/models/sarimax_20261120T141127482438/temperature_c"
+    },
+    "precipitation_mm": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/precipitation_mm"
+    },
+    "humidity_pct": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/humidity_pct"
+    },
+    "uv_index": {
+      "model": "random_forest",
+      "directory": "data/models/random_forest_20261120T135049251958"
+    },
+    "wind_speed_ms": {
+      "model": "lstm",
+      "directory": "data/models/lstm_20261120T175340139816/wind_speed_ms"
+    },
+    "rain_probability": {
+      "model": "random_forest",
+      "directory": "data/models/rain_random_forest_20261120T190019747084"
+    },
+    "wind_direction_deg": {
+      "model": "ridge",
+      "directory": "data/models/wind_direction_ridge_20261120T191558239804"
+    }
+  },
+  "accuracy_with_recent_inputs_established": false,
+  "completed_at_utc": "2026-11-22T11:28:27.850170+00:00"
+}

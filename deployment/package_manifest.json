@@ -1,0 +1,27 @@
+{
+  "purpose": "Saved-results dashboard demonstration",
+  "historical_run": "20261121T180851780350_0c35c990",
+  "experimental_run": "20261122T112757805880_3d090c6d",
+  "experimental_evaluation": "20261122T195010270213",
+  "live_forecasting": false,
+  "data_files": [
+    "agent_logs/20261121T180851780350_0c35c990.json",
+    "forecasts/agent_forecast_20261121T180851780350_0c35c990.csv",
+    "alerts/agent_alerts_20261121T180851780350_0c35c990.json",
+    "monitoring/agent_monitoring_20261121T180851780350_0c35c990.json",
+    "reports/agent_report_20261121T180851780350_0c35c990.md",
+    "evaluation/final_test_20261121T112620710620/regression_summary.csv",
+    "evaluation/final_test_20261121T112620710620/regression_by_horizon.csv",
+    "evaluation/final_test_20261121T112620710620/rain_summary.csv",
+    "evaluation/final_test_20261121T112620710620/wind_direction_summary.csv",
+    "eda/training/01_distributions.png",
+    "eda/training/02_daily_trends.png",
+    "eda/training/03_hourly_patterns.png",
+    "experimental_forecasts/20261122T112757805880_3d090c6d/execution_log.json",
+    "experimental_forecasts/20261122T112757805880_3d090c6d/forecast.csv",
+    "experimental_forecasts/20261122T112757805880_3d090c6d/baseline_predictions.csv",
+    "experimental_forecasts/20261122T112757805880_3d090c6d/evaluations/20261122T195010270213/evaluation_metadata.json",
+    "experimental_forecasts/20261122T112757805880_3d090c6d/evaluations/20261122T195010270213/timing.csv",
+    "experimental_forecasts/20261122T112757805880_3d090c6d/evaluations/20261122T195010270213/scores.csv"
+  ]
+}

@@ -1,0 +1,5 @@
+model,mean_brier_score
+always_dry,0.011111111111111112
+previous_day,0.022222222222222223
+random_forest,0.011018183754873906
+training_frequency,0.01147451808340915

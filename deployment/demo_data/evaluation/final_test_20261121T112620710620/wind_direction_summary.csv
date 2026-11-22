@@ -1,0 +1,3 @@
+model,mean_angular_mae_deg,mean_angular_rmse_deg,horizons_evaluated
+previous_day,28.318518518518516,46.44823986715807,24
+ridge,26.21375675145282,43.786104634627414,24

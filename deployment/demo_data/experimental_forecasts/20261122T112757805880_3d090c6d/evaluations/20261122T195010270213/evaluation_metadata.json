@@ -1,0 +1,13 @@
+{
+  "checked_at_utc": "2026-11-22T19:50:10.262236+00:00",
+  "forecast_generated_at_utc": "2026-11-22T11:28:27.180384+00:00",
+  "input_cutoff_utc": "2026-11-22T10:00:00+00:00",
+  "input_hashes": {
+    "forecast.csv": "cb8aa4beddd061c9d79cf4a0cfec4dc6c3f67c7f15ad3f166abb01a5b07c9fbb",
+    "baseline_predictions.csv": "377f4841b8a478145c4203a607bc135052f1d022321224b1bd9357cd3adc0730"
+  },
+  "timing_rule": "Target minus one hour must be at or after generation; target must also have elapsed.",
+  "reference_weather": "Open-Meteo ERA5 reanalysis",
+  "reference_air": "Open-Meteo CAMS Global model estimates",
+  "station_observed_accuracy": false
+}
