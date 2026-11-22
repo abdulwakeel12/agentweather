@@ -2,6 +2,15 @@ name: Test Experimental Forecast
 
 on:
   workflow_dispatch:
+    inputs:
+      checkpoint_source:
+        description: "Checkpoint to restore"
+        required: true
+        default: latest_artifact
+        type: choice
+        options:
+          - latest_artifact
+          - recovery_release
 
 permissions:
   contents: read
@@ -291,6 +300,7 @@ jobs:
           PY
 
       - name: Download latest successful checkpoint
+        if: inputs.checkpoint_source == 'latest_artifact'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -382,6 +392,7 @@ jobs:
           PY
 
       - name: Verify and restore previous history
+        if: inputs.checkpoint_source == 'latest_artifact'
         run: |
           python - <<'PY'
           import csv
@@ -522,6 +533,7 @@ jobs:
           temporary.replace(destination)
 
           report = {
+              "checkpoint_source": "latest_artifact",
               "source_workflow_run": selection["workflow_run_id"],
               "source_pipeline_run": log["run_id"],
               "restored_rows": len(rows),
@@ -541,6 +553,201 @@ jobs:
           print("History rows:", len(rows))
           print("Input cutoff:", last_hour.isoformat())
           print("Checksum verification: PASS")
+          PY
+
+      - name: Download recovery release
+        if: inputs.checkpoint_source == 'recovery_release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download experimental-state-45075782033-1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir cloud-test/recovery-release \
+            --pattern "history_checkpoint.zip" \
+            --pattern "history_checkpoint.zip.sha256"
+
+      - name: Verify and restore recovery release
+        if: inputs.checkpoint_source == 'recovery_release'
+        run: |
+          python - <<'PY'
+          import csv
+          import hashlib
+          import io
+          import json
+          import re
+          from datetime import datetime
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          root = Path.cwd()
+          folder = root / "cloud-test/recovery-release"
+          archive_path = folder / "history_checkpoint.zip"
+          checksum_path = folder / "history_checkpoint.zip.sha256"
+
+          checksum_parts = checksum_path.read_text(
+              encoding="utf-8"
+          ).strip().split()
+
+          if len(checksum_parts) != 2:
+              raise ValueError("Invalid archive checksum file.")
+
+          expected_hash, expected_name = checksum_parts
+
+          if expected_name != archive_path.name:
+              raise ValueError("Archive checksum filename mismatch.")
+
+          if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_hash):
+              raise ValueError("Invalid archive SHA-256.")
+
+          archive_hash = hashlib.sha256(
+              archive_path.read_bytes()
+          ).hexdigest()
+
+          if archive_hash != expected_hash.lower():
+              raise ValueError("Recovery archive checksum mismatch.")
+
+          history_member = "data/experimental_state/history.csv"
+          expected_members = {
+              history_member,
+              "checkpoint_manifest.json",
+              "execution_log.json",
+          }
+
+          with ZipFile(archive_path) as archive:
+              names = archive.namelist()
+
+              if (
+                  len(names) != len(set(names))
+                  or set(names) != expected_members
+              ):
+                  raise ValueError(
+                      "Unexpected recovery archive contents."
+                  )
+
+              if archive.testzip() is not None:
+                  raise ValueError(
+                      "Recovery archive integrity check failed."
+                  )
+
+              history = archive.read(history_member)
+              manifest = json.loads(
+                  archive.read("checkpoint_manifest.json")
+              )
+              log = json.loads(
+                  archive.read("execution_log.json")
+              )
+
+          history_hash = hashlib.sha256(history).hexdigest()
+
+          if (
+              history_hash != manifest["history_sha256"]
+              or history_hash != log["input_history_sha256"]
+              or len(history) != manifest["history_bytes"]
+          ):
+              raise ValueError(
+                  "Recovery history verification failed."
+              )
+
+          if (
+              log.get("status") != "success"
+              or log.get("mode") != "experimental_mixed_source"
+              or log.get("run_id") != manifest["source_pipeline_run"]
+              or manifest["source_pipeline_run"]
+              != "20261122T220706756385_9f51ee1c"
+              or manifest["source_workflow_run"] != 45075782033
+          ):
+              raise ValueError(
+                  "Unexpected recovery checkpoint provenance."
+              )
+
+          plan = json.loads(
+              (root / "evaluation_plan.json").read_text(
+                  encoding="utf-8-sig"
+              )
+          )
+
+          if (
+              manifest["selected_models"] != plan["selected_models"]
+              or log["selected_models"] != plan["selected_models"]
+          ):
+              raise ValueError(
+                  "Recovery checkpoint model selection differs."
+              )
+
+          rows = list(
+              csv.DictReader(
+                  io.StringIO(history.decode("utf-8-sig"))
+              )
+          )
+
+          if (
+              not rows
+              or len(rows) != manifest["history_rows"]
+              or len(rows) != log["history_rows"]
+          ):
+              raise ValueError(
+                  "Recovery history row count mismatch."
+              )
+
+          cutoff = datetime.fromisoformat(
+              rows[-1]["hour_utc"]
+          )
+
+          if (
+              cutoff != datetime.fromisoformat(
+                  manifest["input_cutoff_utc"]
+              )
+              or cutoff != datetime.fromisoformat(
+                  log["input_cutoff_utc"]
+              )
+          ):
+              raise ValueError(
+                  "Recovery history cutoff mismatch."
+              )
+
+          destination = (
+              root / "data/experimental_state/history.csv"
+          )
+          destination.parent.mkdir(
+              parents=True, exist_ok=True
+          )
+
+          temporary = destination.with_suffix(".recovery.tmp")
+          temporary.write_bytes(history)
+          temporary.replace(destination)
+
+          report = {
+              "checkpoint_source": "recovery_release",
+              "release_tag": "experimental-state-45075782033-1",
+              "source_pipeline_run": manifest["source_pipeline_run"],
+              "restored_rows": len(rows),
+              "restored_cutoff_utc": cutoff.isoformat(),
+              "sha256": history_hash,
+              "verification": "passed",
+              "note": (
+                  "Explicit recovery selection; "
+                  "may precede newer runs."
+              ),
+          }
+
+          (root / "cloud-test/checkpoint_restore.json").write_text(
+              json.dumps(report, indent=2),
+              encoding="utf-8",
+          )
+
+          print("Recovery release checkpoint restored.")
+          print(
+              "Source pipeline run:",
+              manifest["source_pipeline_run"],
+          )
+          print("History rows:", len(rows))
+          print("Input cutoff:", cutoff.isoformat())
+          print(
+              "Archive and history checksum verification: PASS"
+          )
+          print(
+              "The pipeline will validate continuity before forecasting."
+          )
           PY
 
       - name: Install inference dependencies
