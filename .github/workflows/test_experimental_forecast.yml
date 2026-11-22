@@ -60,12 +60,16 @@ jobs:
           bundle_dir = root / "cloud-test" / "bundles"
           report_dir = root / "cloud-test"
 
+
           def file_hash(path):
               digest = hashlib.sha256()
               with path.open("rb") as handle:
-                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                  for chunk in iter(
+                      lambda: handle.read(1024 * 1024), b""
+                  ):
                       digest.update(chunk)
               return digest.hexdigest()
+
 
           def restore_bundle(filename, checkpoint=False):
               archive_path = bundle_dir / filename
@@ -75,44 +79,64 @@ jobs:
               ).strip().split()
 
               if len(checksum_parts) != 2:
-                  raise ValueError(f"Invalid checksum file: {checksum_path.name}")
+                  raise ValueError(
+                      f"Invalid checksum file: {checksum_path.name}"
+                  )
 
               expected_hash, expected_name = checksum_parts
+
               if expected_name != filename:
-                  raise ValueError(f"Checksum filename mismatch: {filename}")
+                  raise ValueError(
+                      f"Checksum filename mismatch: {filename}"
+                  )
 
               if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_hash):
                   raise ValueError(f"Invalid SHA-256: {filename}")
 
               if file_hash(archive_path) != expected_hash.lower():
-                  raise ValueError(f"Archive checksum mismatch: {filename}")
+                  raise ValueError(
+                      f"Archive checksum mismatch: {filename}"
+                  )
 
               with ZipFile(archive_path) as archive:
                   names = archive.namelist()
-                  if len(names) != len(set(names)):
-                      raise ValueError(f"Duplicate archive members: {filename}")
 
-                  manifest = json.loads(archive.read("bundle_manifest.json"))
+                  if len(names) != len(set(names)):
+                      raise ValueError(
+                          f"Duplicate archive members: {filename}"
+                      )
+
+                  manifest = json.loads(
+                      archive.read("bundle_manifest.json")
+                  )
                   members = manifest["files"]
-                  expected_members = set(members) | {"bundle_manifest.json"}
+                  expected_members = (
+                      set(members) | {"bundle_manifest.json"}
+                  )
 
                   if set(names) != expected_members:
-                      raise ValueError(f"Unexpected archive contents: {filename}")
+                      raise ValueError(
+                          f"Unexpected archive contents: {filename}"
+                      )
 
                   # Verify every member before restoring any file.
                   for relative, metadata in members.items():
                       path = PurePosixPath(relative)
+
                       if (
                           path.is_absolute()
                           or ".." in path.parts
                           or "\\" in relative
                           or ":" in relative
                       ):
-                          raise ValueError(f"Unsafe archive path: {relative}")
+                          raise ValueError(
+                              f"Unsafe archive path: {relative}"
+                          )
 
                       if checkpoint:
                           allowed = (
-                              relative == "data/experimental_state/history.csv"
+                              relative
+                              == "data/experimental_state/history.csv"
                           )
                       else:
                           allowed = (
@@ -122,18 +146,24 @@ jobs:
                           )
 
                       if not allowed:
-                          raise ValueError(f"Unexpected file: {relative}")
+                          raise ValueError(
+                              f"Unexpected file: {relative}"
+                          )
 
                       info = archive.getinfo(relative)
                       mode = info.external_attr >> 16
+
                       if info.is_dir() or stat.S_ISLNK(mode):
-                          raise ValueError(f"Invalid archive member: {relative}")
+                          raise ValueError(
+                              f"Invalid archive member: {relative}"
+                          )
 
                       target = root.joinpath(*path.parts)
                       target.resolve().relative_to(root)
 
                       digest = hashlib.sha256()
                       size = 0
+
                       with archive.open(relative) as handle:
                           for chunk in iter(
                               lambda: handle.read(1024 * 1024), b""
@@ -145,35 +175,84 @@ jobs:
                           digest.hexdigest() != metadata["sha256"]
                           or size != metadata["bytes"]
                       ):
-                          raise ValueError(f"Member verification failed: {relative}")
+                          raise ValueError(
+                              f"Member verification failed: {relative}"
+                          )
 
                       if target.exists():
                           if not target.is_file():
-                              raise ValueError(f"Destination is not a file: {relative}")
-                          if file_hash(target) != metadata["sha256"]:
                               raise ValueError(
-                                  f"Repository file differs from release: {relative}"
+                                  "Destination is not a file: "
+                                  f"{relative}"
                               )
 
+                          if file_hash(target) != metadata["sha256"]:
+                              if relative == "evaluation_plan.json":
+                                  repository_plan = json.loads(
+                                      target.read_text(
+                                          encoding="utf-8-sig"
+                                      )
+                                  )
+                                  release_plan = json.loads(
+                                      archive.read(relative).decode(
+                                          "utf-8-sig"
+                                      )
+                                  )
+
+                                  if repository_plan != release_plan:
+                                      raise ValueError(
+                                          "Evaluation plan settings differ "
+                                          "between repository and release. "
+                                          "Review both plans before "
+                                          "continuing."
+                                      )
+
+                                  print(
+                                      "Evaluation plan settings match; "
+                                      "only file formatting differs."
+                                  )
+                              else:
+                                  raise ValueError(
+                                      "Repository file differs from "
+                                      f"release: {relative}"
+                                  )
+
+                  # Preserve existing verified files.
                   for relative in members:
-                      target = root.joinpath(*PurePosixPath(relative).parts)
+                      target = root.joinpath(
+                          *PurePosixPath(relative).parts
+                      )
+
                       if target.exists():
                           continue
-                      target.parent.mkdir(parents=True, exist_ok=True)
+
+                      target.parent.mkdir(
+                          parents=True, exist_ok=True
+                      )
+
                       with archive.open(relative) as source:
                           with target.open("xb") as destination:
-                              shutil.copyfileobj(source, destination)
+                              shutil.copyfileobj(
+                                  source, destination
+                              )
 
-              manifest_path = report_dir / f"{archive_path.stem}_manifest.json"
+              manifest_path = (
+                  report_dir / f"{archive_path.stem}_manifest.json"
+              )
               manifest_path.write_text(
                   json.dumps(manifest, indent=2),
                   encoding="utf-8",
               )
+
               print(f"Verified and restored: {filename}")
               return manifest
 
+
           models = restore_bundle("selected_models.zip")
-          restore_bundle("initial_history_checkpoint.zip", checkpoint=True)
+          restore_bundle(
+              "initial_history_checkpoint.zip",
+              checkpoint=True,
+          )
 
           packages = models["environment"]["packages"]
           required_packages = [
@@ -189,21 +268,35 @@ jobs:
           ]
 
           requirements = []
+
           for name in required_packages:
               package_version = packages[name]
-              if not re.fullmatch(r"[0-9A-Za-z.+!_-]+", package_version):
-                  raise ValueError(f"Invalid package version for {name}")
+
+              if not re.fullmatch(
+                  r"[0-9A-Za-z.+!_-]+", package_version
+              ):
+                  raise ValueError(
+                      f"Invalid package version for {name}"
+                  )
+
               requirements.append(f"{name}=={package_version}")
 
-          requirements_path = report_dir / "inference-requirements.txt"
+          requirements_path = (
+              report_dir / "inference-requirements.txt"
+          )
           requirements_path.write_text(
               "\n".join(requirements) + "\n",
               encoding="utf-8",
           )
 
           print("\nRecorded inference dependencies:")
-          print(requirements_path.read_text(encoding="utf-8"))
-          print("Bundle checks passed. Runtime compatibility is still untested.")
+          print(
+              requirements_path.read_text(encoding="utf-8")
+          )
+          print(
+              "Bundle checks passed. "
+              "Runtime compatibility is still untested."
+          )
           PY
 
       - name: Install inference dependencies
