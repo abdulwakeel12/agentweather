@@ -58,7 +58,7 @@ jobs:
           from zipfile import ZipFile
 
           root = Path.cwd().resolve()
-          bundle_dir = root / "cloud-test" / "bundles"
+          bundle_dir = root / "cloud-test/bundles"
           report_dir = root / "cloud-test"
 
 
@@ -120,7 +120,7 @@ jobs:
                           f"Unexpected archive contents: {filename}"
                       )
 
-                  # Verify every member before restoring any file.
+                  # Verify every member before restoring files.
                   for relative, metadata in members.items():
                       path = PurePosixPath(relative)
 
@@ -183,8 +183,7 @@ jobs:
                       if target.exists():
                           if not target.is_file():
                               raise ValueError(
-                                  "Destination is not a file: "
-                                  f"{relative}"
+                                  f"Destination is not a file: {relative}"
                               )
 
                           if file_hash(target) != metadata["sha256"]:
@@ -204,8 +203,7 @@ jobs:
                                       raise ValueError(
                                           "Evaluation plan settings differ "
                                           "between repository and release. "
-                                          "Review both plans before "
-                                          "continuing."
+                                          "Review both plans before continuing."
                                       )
 
                                   print(
@@ -214,11 +212,10 @@ jobs:
                                   )
                               else:
                                   raise ValueError(
-                                      "Repository file differs from "
-                                      f"release: {relative}"
+                                      "Repository file differs from release: "
+                                      f"{relative}"
                                   )
 
-                  # Preserve existing verified files.
                   for relative in members:
                       target = root.joinpath(
                           *PurePosixPath(relative).parts
@@ -233,9 +230,7 @@ jobs:
 
                       with archive.open(relative) as source:
                           with target.open("xb") as destination:
-                              shutil.copyfileobj(
-                                  source, destination
-                              )
+                              shutil.copyfileobj(source, destination)
 
               manifest_path = (
                   report_dir / f"{archive_path.stem}_manifest.json"
@@ -291,20 +286,100 @@ jobs:
           )
 
           print("\nRecorded inference dependencies:")
-          print(
-              requirements_path.read_text(encoding="utf-8")
-          )
+          print(requirements_path.read_text(encoding="utf-8"))
           print("Bundle verification completed.")
           PY
 
-      - name: Download previous successful run
+      - name: Download latest successful checkpoint
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download 45071851566 \
-            --repo "$GITHUB_REPOSITORY" \
-            --name experimental-test-45071851566-1 \
-            --dir cloud-test/previous-run
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          current_run = int(os.environ["GITHUB_RUN_ID"])
+          workflow = "test_experimental_forecast.yml"
+
+          endpoint = (
+              f"repos/{repository}/actions/workflows/{workflow}/runs"
+              "?branch=main&status=success&per_page=100"
+          )
+
+          response = subprocess.run(
+              ["gh", "api", endpoint],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          payload = json.loads(response.stdout)
+
+          candidates = [
+              run
+              for run in payload["workflow_runs"]
+              if run["id"] != current_run
+              and run["head_branch"] == "main"
+              and run["status"] == "completed"
+              and run["conclusion"] == "success"
+          ]
+
+          if not candidates:
+              raise RuntimeError(
+                  "No previous successful workflow run found. "
+                  "Stopping instead of reverting to the initial checkpoint."
+              )
+
+          selected = max(
+              candidates,
+              key=lambda run: (
+                  run["run_number"],
+                  run["run_attempt"],
+              ),
+          )
+
+          run_id = selected["id"]
+          attempt = selected["run_attempt"]
+          artifact_name = f"experimental-test-{run_id}-{attempt}"
+          destination = Path("cloud-test/previous-run")
+
+          subprocess.run(
+              [
+                  "gh",
+                  "run",
+                  "download",
+                  str(run_id),
+                  "--repo",
+                  repository,
+                  "--name",
+                  artifact_name,
+                  "--dir",
+                  str(destination),
+              ],
+              check=True,
+          )
+
+          selection = {
+              "workflow_run_id": run_id,
+              "workflow_run_number": selected["run_number"],
+              "workflow_run_attempt": attempt,
+              "artifact_name": artifact_name,
+              "head_sha": selected["head_sha"],
+              "url": selected["html_url"],
+          }
+
+          Path("cloud-test/checkpoint_selection.json").write_text(
+              json.dumps(selection, indent=2),
+              encoding="utf-8",
+          )
+
+          print("Selected previous successful workflow run:", run_id)
+          print("Workflow run number:", selected["run_number"])
+          print("Artifact:", artifact_name)
+          print("Missing or expired artifacts cause this step to fail.")
+          PY
 
       - name: Verify and restore previous history
         run: |
@@ -318,25 +393,26 @@ jobs:
 
           root = Path.cwd()
           previous = root / "cloud-test/previous-run"
-          previous_run_id = "20261122T212430565404_6f15171a"
 
-          previous_run = (
-              previous
-              / "data/experimental_forecasts"
-              / previous_run_id
+          selection = json.loads(
+              (root / "cloud-test/checkpoint_selection.json").read_text(
+                  encoding="utf-8"
+              )
           )
-          checkpoint = (
-              previous / "data/experimental_state/history.csv"
+
+          forecast_root = previous / "data/experimental_forecasts"
+          logs = sorted(
+              forecast_root.glob("*/execution_log.json")
           )
-          log_path = previous_run / "execution_log.json"
-          run_history = previous_run / "input_history.csv"
 
-          for path in (checkpoint, log_path, run_history):
-              if not path.is_file():
-                  raise FileNotFoundError(
-                      f"Required previous-run file missing: {path}"
-                  )
+          if len(logs) != 1:
+              raise ValueError(
+                  "Expected exactly one pipeline execution log "
+                  f"in the downloaded artifact; found {len(logs)}."
+              )
 
+          log_path = logs[0]
+          previous_run = log_path.parent
           log = json.loads(
               log_path.read_text(encoding="utf-8")
           )
@@ -346,8 +422,35 @@ jobs:
                   "Previous pipeline did not complete successfully."
               )
 
-          if log.get("run_id") != previous_run_id:
-              raise ValueError("Previous run ID does not match.")
+          if log.get("run_id") != previous_run.name:
+              raise ValueError(
+                  "Previous pipeline run ID does not match its folder."
+              )
+
+          if log.get("mode") != "experimental_mixed_source":
+              raise ValueError("Unexpected previous pipeline mode.")
+
+          plan = json.loads(
+              (root / "evaluation_plan.json").read_text(
+                  encoding="utf-8-sig"
+              )
+          )
+
+          if log.get("selected_models") != plan["selected_models"]:
+              raise ValueError(
+                  "Previous run used different selected models."
+              )
+
+          checkpoint = (
+              previous / "data/experimental_state/history.csv"
+          )
+          run_history = previous_run / "input_history.csv"
+
+          for path in (checkpoint, run_history):
+              if not path.is_file():
+                  raise FileNotFoundError(
+                      f"Required previous-run file missing: {path}"
+                  )
 
           content = checkpoint.read_bytes()
           digest = hashlib.sha256(content).hexdigest()
@@ -359,7 +462,7 @@ jobs:
 
           if content != run_history.read_bytes():
               raise ValueError(
-                  "Previous checkpoint differs from its saved run history."
+                  "Checkpoint differs from the previous run's input history."
               )
 
           rows = list(
@@ -411,8 +514,7 @@ jobs:
 
           if last_hour < original_cutoff:
               raise ValueError(
-                  "Previous-run checkpoint is older than "
-                  "the release checkpoint."
+                  "Selected checkpoint is older than the release checkpoint."
               )
 
           temporary = destination.with_suffix(".restore.tmp")
@@ -420,8 +522,8 @@ jobs:
           temporary.replace(destination)
 
           report = {
-              "source_workflow_run": 45071851566,
-              "source_pipeline_run": previous_run_id,
+              "source_workflow_run": selection["workflow_run_id"],
+              "source_pipeline_run": log["run_id"],
               "restored_rows": len(rows),
               "restored_cutoff_utc": last_hour.isoformat(),
               "sha256": digest,
@@ -433,14 +535,12 @@ jobs:
               encoding="utf-8",
           )
 
-          print("Previous successful checkpoint restored.")
-          print("Source pipeline run:", previous_run_id)
+          print("Latest successful checkpoint restored.")
+          print("Source workflow run:", selection["workflow_run_id"])
+          print("Source pipeline run:", log["run_id"])
           print("History rows:", len(rows))
           print("Input cutoff:", last_hour.isoformat())
           print("Checksum verification: PASS")
-          print(
-              "The pipeline will continue from this saved history."
-          )
           PY
 
       - name: Install inference dependencies
