@@ -1,0 +1,226 @@
+name: Save Forecast Recovery Checkpoint
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: agentweather-save-recovery-checkpoint
+  cancel-in-progress: false
+
+jobs:
+  save-checkpoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_RUN: "45075782033"
+      SOURCE_ARTIFACT: experimental-test-45075782033-1
+      CHECKPOINT_TAG: experimental-state-45075782033-1
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Download verified forecast artifact
+        run: |
+          gh run download "$SOURCE_RUN" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$SOURCE_ARTIFACT" \
+            --dir checkpoint-source
+
+      - name: Validate and package recovery checkpoint
+        run: |
+          python - <<'PY'
+          import csv
+          import hashlib
+          import io
+          import json
+          import os
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          source = Path("checkpoint-source")
+          pipeline_run = "20261122T220706756385_9f51ee1c"
+          run_dir = (
+              source / "data/experimental_forecasts" / pipeline_run
+          )
+          history_path = (
+              source / "data/experimental_state/history.csv"
+          )
+          log_path = run_dir / "execution_log.json"
+
+          log = json.loads(log_path.read_text(encoding="utf-8"))
+
+          if log.get("status") != "success":
+              raise ValueError("Source pipeline was not successful.")
+
+          if log.get("run_id") != pipeline_run:
+              raise ValueError("Unexpected source pipeline run.")
+
+          history = history_path.read_bytes()
+          history_hash = hashlib.sha256(history).hexdigest()
+
+          if history_hash != log["input_history_sha256"]:
+              raise ValueError("History checksum mismatch.")
+
+          if history != (run_dir / "input_history.csv").read_bytes():
+              raise ValueError("Checkpoint differs from run history.")
+
+          rows = list(
+              csv.DictReader(
+                  io.StringIO(history.decode("utf-8-sig"))
+              )
+          )
+
+          if len(rows) != 9286 or len(rows) != log["history_rows"]:
+              raise ValueError("Unexpected checkpoint row count.")
+
+          cutoff = datetime.fromisoformat(rows[-1]["hour_utc"])
+          expected_cutoff = datetime.fromisoformat(
+              log["input_cutoff_utc"]
+          )
+
+          if cutoff != expected_cutoff:
+              raise ValueError("Checkpoint cutoff mismatch.")
+
+          for filename, expected_rows in (
+              ("forecast.csv", 24),
+              ("baseline_predictions.csv", 48),
+          ):
+              with (run_dir / filename).open(
+                  encoding="utf-8-sig", newline=""
+              ) as handle:
+                  count = sum(1 for _ in csv.DictReader(handle))
+              if count != expected_rows:
+                  raise ValueError(
+                      f"{filename}: unexpected row count {count}"
+                  )
+
+          output = Path("checkpoint-release")
+          output.mkdir()
+
+          manifest = {
+              "schema_version": 1,
+              "purpose": "Experimental forecast recovery checkpoint",
+              "created_at_utc": datetime.now(UTC).isoformat(),
+              "source_workflow_run": int(os.environ["SOURCE_RUN"]),
+              "source_artifact": os.environ["SOURCE_ARTIFACT"],
+              "source_pipeline_run": pipeline_run,
+              "history_rows": len(rows),
+              "input_cutoff_utc": cutoff.isoformat(),
+              "source_transition_utc": log["source_transition_utc"],
+              "selected_models": log["selected_models"],
+              "evaluation_plan_sha256": log["evaluation_plan_sha256"],
+              "history_sha256": history_hash,
+              "history_bytes": len(history),
+              "accuracy_with_recent_inputs_established": False,
+          }
+
+          manifest_text = json.dumps(manifest, indent=2)
+          archive_path = output / "history_checkpoint.zip"
+
+          with ZipFile(
+              archive_path,
+              "x",
+              compression=ZIP_DEFLATED,
+              compresslevel=6,
+          ) as archive:
+              archive.writestr(
+                  "data/experimental_state/history.csv",
+                  history,
+              )
+              archive.writestr(
+                  "checkpoint_manifest.json",
+                  manifest_text,
+              )
+              archive.writestr(
+                  "execution_log.json",
+                  log_path.read_bytes(),
+              )
+
+          with ZipFile(archive_path) as archive:
+              if archive.testzip() is not None:
+                  raise ValueError("Checkpoint archive integrity failed.")
+
+              restored = archive.read(
+                  "data/experimental_state/history.csv"
+              )
+              if hashlib.sha256(restored).hexdigest() != history_hash:
+                  raise ValueError("Archived history checksum mismatch.")
+
+          archive_hash = hashlib.sha256(
+              archive_path.read_bytes()
+          ).hexdigest()
+
+          (output / "history_checkpoint.zip.sha256").write_text(
+              f"{archive_hash}  history_checkpoint.zip\n",
+              encoding="utf-8",
+          )
+          (output / "checkpoint_manifest.json").write_text(
+              manifest_text,
+              encoding="utf-8",
+          )
+          (output / "release_notes.md").write_text(
+              "Verified recovery checkpoint for experimental forecasting.\n\n"
+              f"Source pipeline run: `{pipeline_run}`\n\n"
+              f"History rows: {len(rows)}\n\n"
+              f"Input cutoff: {cutoff.isoformat()}\n\n"
+              "Includes history, provenance metadata, and execution log.\n"
+              "Archive and history SHA-256 checks passed.\n\n"
+              "Forecast accuracy with recent GFS inputs remains unestablished.\n"
+              "This checkpoint does not update the dashboard or enable scheduling.\n",
+              encoding="utf-8",
+          )
+
+          print("Recovery checkpoint prepared.")
+          print("History rows:", len(rows))
+          print("Input cutoff:", cutoff.isoformat())
+          print("History and archive integrity: PASS")
+          PY
+
+      - name: Publish recovery checkpoint
+        run: |
+          gh release create "$CHECKPOINT_TAG" \
+            checkpoint-release/history_checkpoint.zip \
+            checkpoint-release/history_checkpoint.zip.sha256 \
+            checkpoint-release/checkpoint_manifest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "AgentWeather experimental recovery checkpoint — run 6" \
+            --notes-file checkpoint-release/release_notes.md \
+            --prerelease \
+            --latest=false
+
+      - name: Verify published archive
+        run: |
+          gh release download "$CHECKPOINT_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "history_checkpoint.zip" \
+            --dir checkpoint-download
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          local = Path("checkpoint-release/history_checkpoint.zip")
+          remote = Path("checkpoint-download/history_checkpoint.zip")
+
+          local_hash = hashlib.sha256(local.read_bytes()).hexdigest()
+          remote_hash = hashlib.sha256(remote.read_bytes()).hexdigest()
+
+          if local_hash != remote_hash:
+              raise ValueError("Published archive checksum mismatch.")
+
+          print("Published recovery checkpoint downloaded and verified.")
+          print("SHA-256:", remote_hash)
+          PY
