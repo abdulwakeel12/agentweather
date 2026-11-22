@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: agentweather-experimental-test
@@ -293,9 +294,152 @@ jobs:
           print(
               requirements_path.read_text(encoding="utf-8")
           )
+          print("Bundle verification completed.")
+          PY
+
+      - name: Download previous successful run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 45071851566 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name experimental-test-45071851566-1 \
+            --dir cloud-test/previous-run
+
+      - name: Verify and restore previous history
+        run: |
+          python - <<'PY'
+          import csv
+          import hashlib
+          import io
+          import json
+          from datetime import datetime
+          from pathlib import Path
+
+          root = Path.cwd()
+          previous = root / "cloud-test/previous-run"
+          previous_run_id = "20261122T212430565404_6f15171a"
+
+          previous_run = (
+              previous
+              / "data/experimental_forecasts"
+              / previous_run_id
+          )
+          checkpoint = (
+              previous / "data/experimental_state/history.csv"
+          )
+          log_path = previous_run / "execution_log.json"
+          run_history = previous_run / "input_history.csv"
+
+          for path in (checkpoint, log_path, run_history):
+              if not path.is_file():
+                  raise FileNotFoundError(
+                      f"Required previous-run file missing: {path}"
+                  )
+
+          log = json.loads(
+              log_path.read_text(encoding="utf-8")
+          )
+
+          if log.get("status") != "success":
+              raise ValueError(
+                  "Previous pipeline did not complete successfully."
+              )
+
+          if log.get("run_id") != previous_run_id:
+              raise ValueError("Previous run ID does not match.")
+
+          content = checkpoint.read_bytes()
+          digest = hashlib.sha256(content).hexdigest()
+
+          if digest != log["input_history_sha256"]:
+              raise ValueError(
+                  "Previous checkpoint checksum mismatch."
+              )
+
+          if content != run_history.read_bytes():
+              raise ValueError(
+                  "Previous checkpoint differs from its saved run history."
+              )
+
+          rows = list(
+              csv.DictReader(
+                  io.StringIO(content.decode("utf-8-sig"))
+              )
+          )
+
+          if not rows or len(rows) != log["history_rows"]:
+              raise ValueError(
+                  "Previous checkpoint row count mismatch."
+              )
+
+          last_hour = datetime.fromisoformat(
+              rows[-1]["hour_utc"]
+          )
+          previous_cutoff = datetime.fromisoformat(
+              log["input_cutoff_utc"]
+          )
+
+          if last_hour != previous_cutoff:
+              raise ValueError(
+                  "Previous checkpoint cutoff mismatch."
+              )
+
+          destination = (
+              root / "data/experimental_state/history.csv"
+          )
+
+          if not destination.is_file():
+              raise FileNotFoundError(
+                  "Release checkpoint was not restored."
+              )
+
+          original_rows = list(
+              csv.DictReader(
+                  io.StringIO(
+                      destination.read_text(encoding="utf-8-sig")
+                  )
+              )
+          )
+
+          if not original_rows:
+              raise ValueError("Release checkpoint is empty.")
+
+          original_cutoff = datetime.fromisoformat(
+              original_rows[-1]["hour_utc"]
+          )
+
+          if last_hour < original_cutoff:
+              raise ValueError(
+                  "Previous-run checkpoint is older than "
+                  "the release checkpoint."
+              )
+
+          temporary = destination.with_suffix(".restore.tmp")
+          temporary.write_bytes(content)
+          temporary.replace(destination)
+
+          report = {
+              "source_workflow_run": 45071851566,
+              "source_pipeline_run": previous_run_id,
+              "restored_rows": len(rows),
+              "restored_cutoff_utc": last_hour.isoformat(),
+              "sha256": digest,
+              "verification": "passed",
+          }
+
+          (root / "cloud-test/checkpoint_restore.json").write_text(
+              json.dumps(report, indent=2),
+              encoding="utf-8",
+          )
+
+          print("Previous successful checkpoint restored.")
+          print("Source pipeline run:", previous_run_id)
+          print("History rows:", len(rows))
+          print("Input cutoff:", last_hour.isoformat())
+          print("Checksum verification: PASS")
           print(
-              "Bundle checks passed. "
-              "Runtime compatibility is still untested."
+              "The pipeline will continue from this saved history."
           )
           PY
 
