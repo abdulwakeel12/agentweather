@@ -12,6 +12,9 @@ on:
           - latest_artifact
           - recovery_release
 
+  schedule:
+    - cron: "25 * * * *"
+
 permissions:
   contents: read
   actions: read
@@ -300,7 +303,7 @@ jobs:
           PY
 
       - name: Download latest successful checkpoint
-        if: inputs.checkpoint_source == 'latest_artifact'
+        if: github.event_name == 'schedule' || inputs.checkpoint_source == 'latest_artifact'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -392,7 +395,7 @@ jobs:
           PY
 
       - name: Verify and restore previous history
-        if: inputs.checkpoint_source == 'latest_artifact'
+        if: github.event_name == 'schedule' || inputs.checkpoint_source == 'latest_artifact'
         run: |
           python - <<'PY'
           import csv
@@ -556,7 +559,7 @@ jobs:
           PY
 
       - name: Download recovery release
-        if: inputs.checkpoint_source == 'recovery_release'
+        if: github.event_name == 'workflow_dispatch' && inputs.checkpoint_source == 'recovery_release'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -567,7 +570,7 @@ jobs:
             --pattern "history_checkpoint.zip.sha256"
 
       - name: Verify and restore recovery release
-        if: inputs.checkpoint_source == 'recovery_release'
+        if: github.event_name == 'workflow_dispatch' && inputs.checkpoint_source == 'recovery_release'
         run: |
           python - <<'PY'
           import csv
