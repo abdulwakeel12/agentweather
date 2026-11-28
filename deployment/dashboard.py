@@ -17,6 +17,7 @@ DATA_DIR = BASE_DIR / "demo_data"
 TEST_DIR = DATA_DIR / "evaluation/final_test_20261121T112620710620"
 EDA_DIR = DATA_DIR / "eda/training"
 EXPERIMENT_DIR = DATA_DIR / "experimental_forecasts"
+CLOUD_DIR = BASE_DIR / "cloud_data" / "experimental_forecasts"
 
 HISTORICAL_MODE = "retrospective_historical_demo"
 EXPERIMENTAL_MODE = "experimental_mixed_source"
@@ -153,9 +154,11 @@ def load_historical():
 
 def list_experimental_runs():
     runs = []
-    for path in sorted(
-        EXPERIMENT_DIR.glob("*/execution_log.json"), reverse=True
-    ):
+    paths = [
+        *EXPERIMENT_DIR.glob("*/execution_log.json"),
+        *CLOUD_DIR.glob("*/execution_log.json"),
+    ]
+    for path in sorted(paths, key=lambda item: item.parent.name, reverse=True):
         try:
             log = read_json(path)
             if (
@@ -172,6 +175,13 @@ def list_experimental_runs():
 
 
 def load_experimental(run_dir):
+    if run_dir.parent == CLOUD_DIR:
+        publication = read_json(CLOUD_DIR.parent / "publication.json")
+        if publication["run_id"] != run_dir.name:
+            raise ValueError("Cloud publication run ID differs.")
+        for name in ("forecast.csv", "baseline_predictions.csv", "execution_log.json"):
+            if file_hash(run_dir / name) != publication["files"][name]:
+                raise ValueError(f"Cloud publication checksum mismatch: {name}")
     log = read_json(run_dir / "execution_log.json")
     frame = pd.read_csv(run_dir / "forecast.csv")
 
@@ -682,11 +692,26 @@ def show_period(frame, origin, generated, experimental):
     )
     if experimental:
         now = pd.Timestamp.now(tz="UTC")
+        generated_time = pd.Timestamp(generated)
+        age_hours = (now - generated_time).total_seconds() / 3600
+        input_age = (now - pd.Timestamp(origin)).total_seconds() / 3600
+        st.caption(
+            f"Forecast age: {age_hours:.1f} hours. "
+            f"Input cutoff age: {input_age:.1f} hours."
+        )
+        if age_hours < 0:
+            raise ValueError("Forecast generation time is in the future.")
+        if age_hours > 3:
+            st.warning(
+                "Stale results: this forecast was generated more than 3 hours ago. "
+                "A newer forecast has not been published here. "
+                "This freshness threshold is a display rule, not an accuracy test."
+            )
         if now > last:
             st.warning("This saved prediction period has ended.")
         else:
             st.caption(
-                "This is a saved experimental run. Refresh reads files; "
+                "This is a saved experimental forecast. Refresh reads files; "
                 "it does not collect weather or generate a new forecast."
             )
 
@@ -727,8 +752,11 @@ def main():
             "Historical Analysis",
         ],
     )
-    st.sidebar.button("Refresh saved results")
-    st.sidebar.caption("Reads saved files only. No model execution or API calls.")
+    st.sidebar.button("Refresh displayed results")
+    st.sidebar.caption(
+        "Displays published forecast files. GitHub runs the models separately. "
+        "Refreshing this page does not generate a forecast."
+    )
 
     st.title("AgentWeather")
     st.caption("Weather and air-quality insights for Karachi")
@@ -779,6 +807,10 @@ def main():
             format_func=lambda path: path.name,
         )
         log, frame = load_experimental(run_dir)
+        if run_dir.parent == CLOUD_DIR:
+            st.caption("Source: published cloud workflow output.")
+        else:
+            st.info("Bundled demonstration run; this is not the latest cloud feed.")
         show_period(
             frame, log["input_cutoff_utc"], log["generated_at_utc"], True
         )

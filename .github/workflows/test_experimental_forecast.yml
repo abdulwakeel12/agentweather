@@ -16,7 +16,7 @@ on:
     - cron: "25 * * * *"
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 concurrency:
@@ -769,6 +769,32 @@ jobs:
           set -o pipefail
           python run_experimental_pipeline.py 2>&1 \
             | tee cloud-test/pipeline.log
+
+      - name: Publish verified results to dashboard
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin main
+          publication_dir="$RUNNER_TEMP/agentweather-dashboard-publication"
+          git worktree add --detach "$publication_dir" origin/main
+
+          python publish_dashboard_results.py \
+            --destination "$publication_dir/deployment/cloud_data"
+
+          git -C "$publication_dir" config user.name "github-actions[bot]"
+          git -C "$publication_dir" config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git -C "$publication_dir" add -- deployment/cloud_data
+
+          if git -C "$publication_dir" diff --cached --quiet; then
+            echo "No dashboard publication changes."
+          else
+            git -C "$publication_dir" commit \
+              -m "Update experimental dashboard forecast"
+            git -C "$publication_dir" push origin HEAD:main
+          fi
 
       - name: Save results and updated history
         if: always()
