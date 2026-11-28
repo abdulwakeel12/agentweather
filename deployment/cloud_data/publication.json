@@ -1,11 +1,11 @@
 {
-  "run_id": "20261128T161342994277_6cf81e57",
-  "generated_at_utc": "2026-11-28T16:13:50.324741+00:00",
-  "input_cutoff_utc": "2026-11-28T15:00:00+00:00",
-  "prepared_at_utc": "2026-11-28T16:13:51.642692+00:00",
+  "run_id": "20261128T170109348765_d495d3cc",
+  "generated_at_utc": "2026-11-28T17:01:20.112995+00:00",
+  "input_cutoff_utc": "2026-11-28T16:00:00+00:00",
+  "prepared_at_utc": "2026-11-28T17:01:21.688188+00:00",
   "files": {
-    "forecast.csv": "f2f324ef24f3afba5ca4b367b64ef6eea3566dc07d1a192051833b6559e98387",
-    "baseline_predictions.csv": "a3cb4b4dab59de0a6c39567fb715581f4ed40a654e541c4e802a4bd49c36b9a4",
-    "execution_log.json": "5963b2e30a57dbaa571a12ecb5a49721b53c8fb56010fea9579adf8ddadcd04a"
+    "forecast.csv": "b241ebbc505ffd47a53232a332cd1ea4037e6c802313f8e0dde34181d4e7f0b9",
+    "baseline_predictions.csv": "fbb3a42c44ead553add8ddfcafa87f54c0a6b0b454f1b46f2f8be2588c6d1b92",
+    "execution_log.json": "008b175d4db49cf201a9fc7fe62916dff2aeb1b222f9521d8863ac452903bf4c"
   }
 }
